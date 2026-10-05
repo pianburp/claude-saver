@@ -1,5 +1,5 @@
 ![claude-saver status line in Claude Code](image.png)
-![claude-saver status line in Claude Code2](image-1.png)
+<p align="center"><img src="image-1.png" alt="claude-saver status line in Claude Code2"></p>
 
 # claude-saver
 
