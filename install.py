@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Install the status line into ~/.claude and register the ponytail + caveman plugins.
+"""Install the status line into ~/.claude.
 
-Backs up settings.json first. Keys you already set are left alone, except statusLine.
+Pass --with-plugins to also register the ponytail + caveman plugins.
+Backs up settings.json and statusline.py once (first backups are never overwritten).
+Keys you already set are left alone, except statusLine.
 """
 
 import json
 import os
 import shutil
 import sys
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+RAW_URL = "https://raw.githubusercontent.com/pianburp/claude-statusline/main/statusline.py"
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 MARKETPLACES = {
@@ -19,11 +23,14 @@ MARKETPLACES = {
 
 
 def python_cmd():
-    # On Windows, "python3" is often a Microsoft Store stub, so prefer the py launcher.
-    names = ("py", "python") if os.name == "nt" else ("python3", "python")
-    for name in names:
-        if shutil.which(name):
-            return name
+    # On Windows use this interpreter directly: the py launcher adds ~30ms to every redraw,
+    # and "python3" is often a Microsoft Store stub.
+    # Elsewhere use the full path: Claude Code started from a GUI or IDE may have a shorter PATH.
+    if os.name != "nt":
+        for name in ("python3", "python"):
+            path = shutil.which(name)
+            if path:
+                return f'"{path}"'
     return f'"{sys.executable}"'
 
 
@@ -39,30 +46,40 @@ def main():
                 settings = json.load(f)
         except ValueError as e:
             sys.exit(f"Could not read {settings_path}: {e}\nFix the JSON, then run install.py again.")
-        shutil.copy2(settings_path, settings_path + ".bak")
-        print(f"Backed up settings to {settings_path}.bak")
+        if not os.path.exists(settings_path + ".bak"):
+            shutil.copy2(settings_path, settings_path + ".bak")
+            print(f"Backed up settings to {settings_path}.bak")
 
-    if os.path.exists(script):
+    if os.path.exists(script) and not os.path.exists(script + ".bak"):
         shutil.copy2(script, script + ".bak")
-    shutil.copy2(os.path.join(HERE, "statusline.py"), script)
+    local = os.path.join(HERE, "statusline.py")
+    if os.path.exists(local):
+        shutil.copy2(local, script)
+    else:  # piped from curl/irm: no clone, fetch the script
+        urllib.request.urlretrieve(RAW_URL, script)
     print(f"Installed {script}")
 
     settings["statusLine"] = {
         "type": "command",
         "command": f'{python_cmd()} "{script}"',
-        "refreshInterval": 5,
+        "refreshInterval": 1,  # docs minimum; frames are 1s apart
     }
-    markets = settings.setdefault("extraKnownMarketplaces", {})
-    plugins = settings.setdefault("enabledPlugins", {})
-    for name, repo in MARKETPLACES.items():
-        markets.setdefault(name, {"source": {"source": "github", "repo": repo}})
-        plugins.setdefault(f"{name}@{name}", True)
+    with_plugins = "--with-plugins" in sys.argv[1:]
+    if with_plugins:
+        markets = settings.setdefault("extraKnownMarketplaces", {})
+        plugins = settings.setdefault("enabledPlugins", {})
+        for name, repo in MARKETPLACES.items():
+            markets.setdefault(name, {"source": {"source": "github", "repo": repo}})
+            plugins.setdefault(f"{name}@{name}", True)
 
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
         f.write("\n")
     print(f"Updated {settings_path}")
-    print("Restart Claude Code. It will ask once to install ponytail and caveman.")
+    if with_plugins:
+        print("Restart Claude Code. It will ask once to install ponytail and caveman.")
+    else:
+        print("Restart Claude Code. Run with --with-plugins to add ponytail and caveman.")
 
 
 if __name__ == "__main__":

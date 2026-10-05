@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Minimal two-line status line for Claude Code.
+"""Two-line status line styled after Claude Code's own UI.
 
-Line 1: model | effort | active modes (ponytail, caveman)
-Line 2: context | 5h limit | 7d limit | prompt cache
+✻ model · effort · active modes (ponytail, caveman)
+  ⎿  context · 5h limit · 7d limit · prompt cache
+
+Animates on the clock (one frame per second): ✻ spins while Claude works, rising values glow then fade,
+a low prompt cache breathes red. Per-session state lives in ~/.claude/.statusline-ctx/.
 """
 
 import json
@@ -13,8 +16,11 @@ import time
 from datetime import datetime
 
 NO_COLOR = bool(os.environ.get("NO_COLOR"))
+# 24-bit color makes the glow fade smoothly; other terminals get the nearest 256-color shade.
+TRUECOLOR = os.environ.get("COLORTERM") in ("truecolor", "24bit") or bool(os.environ.get("WT_SESSION"))
 
-GRAY = 244
+CLAUDE = 173
+GRAY = 246
 WHITE = 255
 DARK = 238
 GREEN = 114
@@ -22,20 +28,28 @@ YELLOW = 179
 RED = 167
 
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-BAR_WIDTH = 12
+BAR_WIDTH = 10
+GLOW_SECS = 15
+PEACH = 223  # glow start; fades smoothly into the segment's own color
+PULSE = (RED, 131, 95, 131)
+BUSY_SECS = 10
+SPINNER = "·✢✳✶✻✽✻✶✳✢"  # forward then back, like Claude Code's own
+SESSION_RE = r"[A-Za-z0-9_-]{1,128}"
 
 
 def paint(text, color, bold=False):
-    if NO_COLOR:
+    """color is an xterm-256 index or an (r, g, b) tuple."""
+    if NO_COLOR or not text:
         return text
-    return f"\033[{'1;' if bold else ''}38;5;{color}m{text}\033[0m"
+    code = f"38;2;{';'.join(map(str, color))}" if isinstance(color, tuple) else f"38;5;{color}"
+    return f"\033[{'1;' if bold else ''}{code}m{text}\033[0m"
 
 
 def label(text):
     return paint(text, GRAY)
 
 
-SEP = "  " + paint("|", DARK) + "  "
+SEP = paint("  ·  ", DARK)
 
 
 def level_color(pct):
@@ -49,14 +63,79 @@ def to_pct(value):
         return None
 
 
-def bar(pct):
+def to_rgb(c):
+    """xterm-256 index (16-255) to RGB."""
+    if c >= 232:
+        return (8 + 10 * (c - 232),) * 3
+    c -= 16
+    return tuple((0, 95, 135, 175, 215, 255)[n] for n in (c // 36, c // 6 % 6, c % 6))
+
+
+def nearest(rgb):
+    return min(range(16, 256), key=lambda c: sum((a - b) ** 2 for a, b in zip(to_rgb(c), rgb)))
+
+
+def glow(age, base):
+    """PEACH blended into base as age goes 0 to GLOW_SECS; base once there is no change."""
+    if age is None or age >= GLOW_SECS:
+        return base
+    w = 1 - max(0, age) / GLOW_SECS
+    rgb = tuple(round(w * a + (1 - w) * b) for a, b in zip(to_rgb(PEACH), to_rgb(base)))
+    return rgb if TRUECOLOR else nearest(rgb)
+
+
+def bar(pct, glow_from=None, age=None):
+    """Cells from glow_from up to the fill edge glow, fading with age."""
     filled = round(pct / 100 * BAR_WIDTH)
-    return (
-        paint("[", DARK)
-        + paint("=" * filled, level_color(pct))
-        + paint("-" * (BAR_WIDTH - filled), DARK)
-        + paint("]", DARK)
-    )
+    color = CLAUDE if pct < 50 else level_color(pct)
+    start = filled if glow_from is None else min(glow_from, filled)
+    return paint("█" * start, color) + paint("█" * (filled - start), glow(age, color)) + paint("░" * (BAR_WIDTH - filled), DARK)
+
+
+def state_path(session_id):
+    if session_id and re.fullmatch(SESSION_RE, session_id):
+        return os.path.join(CLAUDE_DIR, ".statusline-ctx", session_id)
+    return None
+
+
+def load_state(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def save_state(path, state):
+    # Claude Code cancels a run when a newer update starts, so write then swap: never a half file.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def track(state, key, value, now):
+    """(value before the last change, its age in seconds) while under GLOW_SECS old, else None."""
+    try:
+        old, new, at = state[key]
+    except (KeyError, TypeError, ValueError):
+        old = new = value  # first sight: no glow
+        at = 0
+    if value != new:
+        old, new, at = new, value, now
+    state[key] = [old, new, at]
+    return (old, now - at) if old != new and now - at < GLOW_SECS else None
+
+
+def rose(state, key, value, now):
+    """Age of the change if the value went up, else None."""
+    hit = track(state, key, value, now)
+    return hit[1] if hit and hit[0] < value else None
 
 
 def fmt_reset(epoch):
@@ -72,11 +151,12 @@ def fmt_reset(epoch):
     return f"{dt:%a} {clock}"
 
 
-def fmt_limit(name, window):
+def fmt_limit(name, window, state, now):
     pct = to_pct((window or {}).get("used_percentage"))
     if pct is None:
         return ""
-    out = label(name) + " " + paint(f"{pct:.0f}%", level_color(pct), bold=True)
+    color = glow(rose(state, name, round(pct), now), level_color(pct))
+    out = label(name) + " " + paint(f"{pct:.0f}%", color)
     reset = fmt_reset((window or {}).get("resets_at"))
     if reset:
         out += " " + label(reset)
@@ -90,20 +170,22 @@ def cache_ttl():
         return 3600
 
 
-def fmt_cache(transcript_path):
-    """Time left on the prompt cache, counted from the last transcript write."""
-    if not transcript_path:
+def fmt_cache(idle, frame):
+    """Time left on the prompt cache, counted from the last transcript write.
+
+    Under 5 minutes it breathes through PULSE, one step per second.
+    """
+    if idle is None:
         return ""
     ttl = cache_ttl()
-    try:
-        left = ttl - (time.time() - os.path.getmtime(transcript_path))
-    except OSError:
-        return ""
+    left = ttl - idle
     if left < 1:
-        return label("cache ") + paint("cold", RED, bold=True)
+        return label("cache ") + paint("cold", RED)
     m, s = divmod(int(left), 60)
-    color = GREEN if left > ttl / 2 else YELLOW if left > 300 else RED
-    return label("cache ") + paint(f"{m}m" if m else f"{s}s", color, bold=True)
+    text = f"{m}m" if m else f"{s}s"
+    if left <= 300:
+        return label("cache ") + paint(text, PULSE[frame % len(PULSE)])
+    return label("cache ") + paint(text, GREEN if left > ttl / 2 else YELLOW)
 
 
 def read_flag(path):
@@ -119,21 +201,30 @@ def read_flag(path):
 
 
 def read_modes(session_id):
-    parts = []
+    """[(name, level)] for active modes; level is "" for caveman's default."""
+    modes = []
     pony = read_flag(os.path.join(CLAUDE_DIR, ".ponytail-active"))
     if pony:
-        parts.append(label("pony ") + paint(pony, WHITE))
+        modes.append(("pony", pony))
     # Per-session caveman flag wins over the machine-wide mirror.
     cave_paths = [os.path.join(CLAUDE_DIR, ".caveman-active")]
-    if session_id and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+    if session_id and re.fullmatch(SESSION_RE, session_id):
         cave_paths.insert(0, os.path.join(CLAUDE_DIR, ".caveman-sessions", session_id + ".mode"))
     for path in cave_paths:
         if os.path.exists(path):
             cave = read_flag(path)
             if cave:
-                parts.append(label("cave") + ("" if cave == "caveman" else " " + paint(cave, WHITE)))
+                modes.append(("cave", "" if cave == "caveman" else cave))
             break
-    return paint(" + ", DARK).join(parts)
+    return modes
+
+
+def fmt_modes(modes, age):
+    """The whole group glows, then fades, after any mode turns on, off, or changes level."""
+    return paint(" + ", DARK).join(
+        paint(name, glow(age, GRAY)) + (" " + paint(level, glow(age, WHITE)) if level else "")
+        for name, level in modes
+    )
 
 
 def read_effort(data, cwd, model_id):
@@ -149,7 +240,7 @@ def read_effort(data, cwd, model_id):
         os.path.join(CLAUDE_DIR, "settings.json"),
     ):
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 cfg = json.load(f)
         except (OSError, ValueError):
             continue
@@ -160,27 +251,50 @@ def read_effort(data, cwd, model_id):
     return ""
 
 
-def render(data):
+def render(data, now=None):
+    now = time.time() if now is None else now
     model = data.get("model") or {}
     cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
+    session_id = data.get("session_id")
+    path = state_path(session_id)
+    state = load_state(path) if path else {}
+    # Frames follow the clock, not the redraw count: event redraws come in bursts and gaps.
+    frame = int(now)
 
+    try:
+        idle = now - os.path.getmtime(data.get("transcript_path") or "")
+    except (OSError, TypeError):
+        idle = None
+    # Transcript written recently means Claude is working: spin.
+    star = SPINNER[frame % len(SPINNER)] if idle is not None and idle < BUSY_SECS else "✻"
+
+    modes = read_modes(session_id)
+    hit = track(state, "modes", str(modes), now)
     line1 = [
-        paint(model.get("display_name") or model.get("id") or "Claude", WHITE, bold=True),
+        paint(star + " " + (model.get("display_name") or model.get("id") or "Claude"), CLAUDE, bold=True),
         paint(read_effort(data, cwd, model.get("id")), GRAY),
-        read_modes(data.get("session_id")),
+        fmt_modes(modes, hit[1] if hit else None),
     ]
 
     ctx = to_pct((data.get("context_window") or {}).get("used_percentage"))
     rate = data.get("rate_limits") or {}
+    ctx_part = ""
+    if ctx is not None:
+        cells = round(ctx / 100 * BAR_WIDTH)
+        hit = track(state, "ctx", cells, now)
+        glow_from, age = hit if hit and hit[0] < cells else (None, None)
+        ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{ctx:.0f}%", level_color(ctx))
     line2 = [
-        "" if ctx is None
-        else label("ctx ") + bar(ctx) + " " + paint(f"{ctx:.0f}%", level_color(ctx), bold=True),
-        fmt_limit("5h", rate.get("five_hour")),
-        fmt_limit("7d", rate.get("seven_day")),
-        fmt_cache(data.get("transcript_path")),
+        ctx_part,
+        fmt_limit("5h", rate.get("five_hour"), state, now),
+        fmt_limit("7d", rate.get("seven_day"), state, now),
+        fmt_cache(idle, frame),
     ]
 
-    return "\n".join(SEP.join(p for p in line if p) for line in (line1, line2))
+    if path:
+        save_state(path, state)
+    top, bottom = (SEP.join(p for p in line if p) for line in (line1, line2))
+    return top + ("\n" + paint("  ⎿  ", DARK) + bottom if bottom else "")
 
 
 def main():
