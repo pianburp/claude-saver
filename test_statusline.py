@@ -50,5 +50,28 @@ assert sl.render(data, now=mtime + sl.BUSY_SECS + 1)[0] == "✻"
 # cache: breathes through PULSE under 5 minutes left (colors on to see the codes)
 sl.NO_COLOR = False
 for frame, color in enumerate(sl.PULSE):
-    assert f"38;5;{color}m" in sl.fmt_cache(sl.cache_ttl() - 60, frame=frame)
+    assert f"38;5;{color}m" in sl.fmt_cache(3600 - 60, frame=frame)
+# cache TTL: newest non-zero cache write in the transcript wins; none found falls back to 3600
+os.environ.pop("CLAUDE_CACHE_TTL", None)
+tp = os.path.join(sl.CLAUDE_DIR, "ttl.jsonl")
+with open(tp, "w") as f:
+    f.write('{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":9}}\n')
+    f.write('{"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":0}}\n')
+    f.write('{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}\n')
+assert sl.cache_ttl(tp) == 300
+assert sl.cache_ttl(os.path.join(sl.CLAUDE_DIR, "missing.jsonl")) == 3600
+os.environ["CLAUDE_CACHE_TTL"] = "120"
+assert sl.cache_ttl(tp) == 120  # explicit override beats detection
+del os.environ["CLAUDE_CACHE_TTL"]
+# /compact hint 10 points before auto-compact (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, 50 default)
+sl.NO_COLOR = True
+assert "/compact" in sl.render({"context_window": {"used_percentage": 40}})
+assert "/compact" not in sl.render({"context_window": {"used_percentage": 39}})
+# /clear replaces it once the cache is cold and context is past CLEAR_PCT
+cold = {"transcript_path": transcript, "context_window": {"used_percentage": 45}}
+assert "/clear" in sl.render(cold, now=mtime + 3601) and "/compact" not in sl.render(cold, now=mtime + 3601)
+assert "/clear" not in sl.render(cold, now=mtime + 60)
+assert "/clear" not in sl.render(dict(cold, context_window={"used_percentage": 19}), now=mtime + 3601)
+# bar: any nonzero usage shows at least one cell
+assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == 10
 print("ok")

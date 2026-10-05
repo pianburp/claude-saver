@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Two-line status line styled after Claude Code's own UI.
 
-✻ model · effort · active modes (ponytail, caveman)
-  ⎿  context · 5h limit · 7d limit · prompt cache
+✻ model · effort · active modes (ponytail, caveman) · prompt cache
+  ⎿  context · 5h limit · 7d limit
 
 Animates on the clock (one frame per second): ✻ spins while Claude works, rising values glow then fade,
 a low prompt cache breathes red. Per-session state lives in ~/.claude/.statusline-ctx/.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -33,6 +34,7 @@ GLOW_SECS = 15
 PEACH = 223  # glow start; fades smoothly into the segment's own color
 PULSE = (RED, 131, 95, 131)
 BUSY_SECS = 10
+CLEAR_PCT = 20  # cold cache past this much context: the next message re-bills it all, /clear is cheaper
 SPINNER = "·✢✳✶✻✽✻✶✳✢"  # forward then back, like Claude Code's own
 SESSION_RE = r"[A-Za-z0-9_-]{1,128}"
 
@@ -86,7 +88,7 @@ def glow(age, base):
 
 def bar(pct, glow_from=None, age=None):
     """Cells from glow_from up to the fill edge glow, fading with age."""
-    filled = round(pct / 100 * BAR_WIDTH)
+    filled = math.ceil(pct / 100 * BAR_WIDTH)
     color = CLAUDE if pct < 50 else level_color(pct)
     start = filled if glow_from is None else min(glow_from, filled)
     return paint("█" * start, color) + paint("█" * (filled - start), glow(age, color)) + paint("░" * (BAR_WIDTH - filled), DARK)
@@ -163,21 +165,48 @@ def fmt_limit(name, window, state, now):
     return out
 
 
-def cache_ttl():
+def compact_pct():
+    # Same variable Claude Code reads to auto-compact early; install.py sets it to 50.
     try:
-        return max(1, int(os.environ.get("CLAUDE_CACHE_TTL", 3600)))
+        return float(os.environ.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", 50))
     except ValueError:
-        return 3600
+        return 50.0
 
 
-def fmt_cache(idle, frame):
+CACHE_WRITE = re.compile(r'"cache_creation":\{([^}]*)\}')
+
+
+def detect_ttl(transcript_path):
+    """3600 or 300 from the newest cache write in the transcript tail, or None if there is none yet."""
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(max(0, os.path.getsize(transcript_path) - 65536))
+            tail = f.read().decode("utf-8", "replace")
+    except (OSError, TypeError):
+        return None
+    for body in reversed(CACHE_WRITE.findall(tail)):
+        for key, ttl in (("ephemeral_1h_input_tokens", 3600), ("ephemeral_5m_input_tokens", 300)):
+            m = re.search(rf'"{key}":(\d+)', body)
+            if m and int(m.group(1)):
+                return ttl
+    return None
+
+
+def cache_ttl(transcript_path=None):
+    """CLAUDE_CACHE_TTL if set, else detected from the transcript, else 3600."""
+    try:
+        return max(1, int(os.environ["CLAUDE_CACHE_TTL"]))
+    except (KeyError, ValueError):
+        return detect_ttl(transcript_path) or 3600
+
+
+def fmt_cache(idle, frame, ttl=3600):
     """Time left on the prompt cache, counted from the last transcript write.
 
     Under 5 minutes it breathes through PULSE, one step per second.
     """
     if idle is None:
         return ""
-    ttl = cache_ttl()
     left = ttl - idle
     if left < 1:
         return label("cache ") + paint("cold", RED)
@@ -268,27 +297,33 @@ def render(data, now=None):
     # Transcript written recently means Claude is working: spin.
     star = SPINNER[frame % len(SPINNER)] if idle is not None and idle < BUSY_SECS else "✻"
 
+    ttl = cache_ttl(data.get("transcript_path")) if idle is not None else 3600
     modes = read_modes(session_id)
     hit = track(state, "modes", str(modes), now)
     line1 = [
         paint(star + " " + (model.get("display_name") or model.get("id") or "Claude"), CLAUDE, bold=True),
         paint(read_effort(data, cwd, model.get("id")), GRAY),
         fmt_modes(modes, hit[1] if hit else None),
+        fmt_cache(idle, frame, ttl),
     ]
 
     ctx = to_pct((data.get("context_window") or {}).get("used_percentage"))
     rate = data.get("rate_limits") or {}
     ctx_part = ""
     if ctx is not None:
-        cells = round(ctx / 100 * BAR_WIDTH)
+        cells = math.ceil(ctx / 100 * BAR_WIDTH)
         hit = track(state, "ctx", cells, now)
         glow_from, age = hit if hit and hit[0] < cells else (None, None)
         ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{ctx:.0f}%", level_color(ctx))
+        # 10 points before auto-compact: compact by hand at a clean break instead of mid-task.
+        if idle is not None and idle >= ttl and ctx >= CLEAR_PCT:
+            ctx_part += " " + paint("/clear", YELLOW)
+        elif ctx >= compact_pct() - 10:
+            ctx_part += " " + paint("/compact", YELLOW)
     line2 = [
         ctx_part,
         fmt_limit("5h", rate.get("five_hour"), state, now),
         fmt_limit("7d", rate.get("seven_day"), state, now),
-        fmt_cache(idle, frame),
     ]
 
     if path:

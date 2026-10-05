@@ -1,0 +1,28 @@
+# Weekly: fail if ponytail, caveman or graphify renamed something statusline.py or saver.py reads.
+# GitHub emails the repo owner when a scheduled run fails.
+name: upstream
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for r in DietrichGebert/ponytail JuliusBrussee/caveman safishamsi/graphify; do
+            git clone -q --depth 1 "https://github.com/$r" "${r#*/}"
+          done
+          fail=0
+          need() {  # need <repo> <regex>: regex must appear in the repo's code, not just its docs
+            grep -rqE --include=*.js --include=*.mjs --include=*.py --include=*.sh "$2" "$1" \
+              || { echo "::error::$1 no longer contains: $2"; fail=1; }
+          }
+          need ponytail '\.ponytail-active'           # statusline.py mode badge
+          need ponytail 'PONYTAIL MODE ACTIVE'        # saver.py session detection
+          need caveman '\.caveman-active'             # statusline.py mode badge
+          need caveman '\.caveman-sessions'           # statusline.py per-session mode
+          need caveman 'CAVEMAN MODE ACTIVE'          # saver.py session detection
+          need graphify 'cmd == "(query|path|explain)"'  # saver.py graph query count
+          exit $fail
