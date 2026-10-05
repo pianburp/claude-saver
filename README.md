@@ -104,7 +104,7 @@ A `SessionStart` hook (new sessions only) runs `saver.py check`. It prints nothi
 
 - An instruction file (CLAUDE.md, AGENTS.md, rules, MEMORY.md) is over 500 tokens, or MEMORY.md is past the 200 lines / 25KB that load.
 - A heavy folder isn't in `permissions.deny`: `dist`, `build`, `target`, the ones above, or any folder in the project's `.gitignore` with 1000+ files.
-- MCP servers are configured while `ENABLE_TOOL_SEARCH` is off, so every tool schema loads up front.
+- Project MCP servers (`.mcp.json`) are configured while `ENABLE_TOOL_SEARCH` is off, so every tool schema loads up front.
 
 When it does print, it's one line (~40 tokens) telling Claude to suggest `/token-audit`.
 
@@ -117,7 +117,7 @@ Lists every file Claude Code loads each session (global and project CLAUDE.md, `
 
 - Files over 500 tokens, code blocks over 10 lines, stale paths, and lines repeated across files.
 - A MEMORY.md too long to load in full, and rules without `paths:` frontmatter (those load every session).
-- MCP servers, unblocked heavy folders, and a `.claudeignore` (Claude Code doesn't read it).
+- Project MCP servers (`.mcp.json`), unblocked heavy folders, and a `.claudeignore` (Claude Code doesn't read it).
 - Subagents on your main model (and custom agents with no `model:`), no `## Compact instructions` section, and an unset `BASH_MAX_OUTPUT_LENGTH`.
 - A 5-minute prompt cache when `ENABLE_PROMPT_CACHING_1H` is off.
 

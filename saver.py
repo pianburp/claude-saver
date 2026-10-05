@@ -168,12 +168,8 @@ def env_value(name, cwd):
 
 
 def mcp_servers(cwd):
-    names = set()
-    user = load_json(os.path.expanduser("~/.claude.json"))
-    names |= set((user.get("mcpServers") or {}))
-    names |= set(((user.get("projects") or {}).get(cwd) or {}).get("mcpServers") or {})
-    names |= set(load_json(os.path.join(cwd, ".mcp.json")).get("mcpServers") or {})
-    return sorted(names)
+    # Project .mcp.json only: ~/.claude.json also holds account and MCP credentials, so it is never read.
+    return sorted(load_json(os.path.join(cwd, ".mcp.json")).get("mcpServers") or {})
 
 
 def many_files(path):
@@ -243,6 +239,7 @@ def audit(cwd):
         if tool_search_off(cwd):
             tip += " ENABLE_TOOL_SEARCH is off: turn it on to load schemas on demand."
         tips.append(tip + " Disconnect the ones you do not use.")
+    tips.append("User-scoped MCP servers are not counted here. Run /mcp to see them all.")
     heavy = unblocked_heavy(cwd)
     if os.path.isfile(os.path.join(cwd, ".claudeignore")):
         tips.append("Claude Code does not read .claudeignore. Move its entries to permissions.deny.")
