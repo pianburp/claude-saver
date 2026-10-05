@@ -273,6 +273,10 @@ def read_modes(session_id):
             if cave:
                 modes.append(("cave", "" if cave == "caveman" else cave))
             break
+    else:
+        # Skill-only caveman (npx skills add) writes no flag; say so instead of showing nothing.
+        if os.path.isdir(os.path.join(CLAUDE_DIR, "skills", "caveman")):
+            modes.append(("cave", "no plugin"))
     return modes
 
 
@@ -347,9 +351,11 @@ def render(data, now=None):
         shown, _ = rose(state, "ctx_pct", round(ctx), now)
         ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{shown:.0f}%", level_color(ctx))
         # 10 points before auto-compact: compact by hand at a clean break instead of mid-task.
-        if idle is not None and idle >= ttl and ctx >= CLEAR_PCT:
+        # Also when the cache is about to expire: compacting while warm costs a fraction of re-billing it cold.
+        left = ttl - idle if idle is not None else ttl
+        if left <= 0 and ctx >= CLEAR_PCT:
             ctx_part += " " + paint("/clear", YELLOW)
-        elif ctx >= compact_pct() - 10:
+        elif ctx >= compact_pct() - 10 or (left <= min(300, ttl / 6) and idle >= BUSY_SECS and ctx >= CLEAR_PCT):
             ctx_part += " " + paint("/compact", YELLOW)
     line2 = [
         ctx_part,

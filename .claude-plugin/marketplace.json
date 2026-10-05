@@ -1,0 +1,8 @@
+{
+  "name": "pianburp",
+  "description": "Token-saving tools for Claude Code",
+  "owner": { "name": "pianburp", "url": "https://github.com/pianburp" },
+  "plugins": [
+    { "name": "token-saver", "source": "./" }
+  ]
+}

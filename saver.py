@@ -26,6 +26,7 @@ PONYTAIL_CUT = 0.80
 # ponytail: guess, not measured. Each graph query is assumed to replace this many file reads.
 GRAPHIFY_READS_AVOIDED = 5
 DEFAULT_READ_TOKENS = 1500  # used when the session has no Read calls to average
+NOISY = 2000  # tokens; a tool result this big rides along on every later call
 MANY_FILES = 1000  # a gitignored folder this big is flagged like node_modules
 HEAVY_DIRS = ("node_modules", "dist", "build", ".next", "__pycache__", "coverage", ".venv", "venv", "target")
 
@@ -207,6 +208,16 @@ def unblocked_heavy(cwd):
     return found
 
 
+def unpinned_agents(cwd):
+    """Custom subagents with no `model:` in their frontmatter: they run on the main model."""
+    out = []
+    for path in glob.glob(os.path.join(CLAUDE_DIR, "agents", "*.md")) + glob.glob(os.path.join(cwd, ".claude", "agents", "*.md")):
+        front = (re.match(r"---\n(.*?)\n---", read(path) or "", re.S) or [""])[0]
+        if not re.search(r"(?m)^model\s*:", front):
+            out.append(os.path.splitext(os.path.basename(path))[0])
+    return sorted(out)
+
+
 def tool_search_off(cwd):
     return (env_value("ENABLE_TOOL_SEARCH", cwd) or "").lower() in ("0", "false")
 
@@ -239,7 +250,11 @@ def audit(cwd):
         rules = ", ".join(f'"Read(./{d}/**)"' for d in heavy)
         tips.append(f"Unblocked heavy dirs: {', '.join(heavy)}. Add to permissions.deny in .claude/settings.json: {rules}")
     if not env_value("CLAUDE_CODE_SUBAGENT_MODEL", cwd):
-        tips.append("Subagents use your main model. CLAUDE_CODE_SUBAGENT_MODEL=haiku makes exploration and log reading cheaper.")
+        tip = "Subagents use your main model. CLAUDE_CODE_SUBAGENT_MODEL=haiku makes exploration and log reading cheaper."
+        agents = unpinned_agents(cwd)
+        if agents:
+            tip += f" Or add `model: haiku` to these agents: {', '.join(agents)}."
+        tips.append(tip)
     skills = glob.glob(os.path.join(CLAUDE_DIR, "skills", "*", "SKILL.md")) + glob.glob(os.path.join(cwd, ".claude", "skills", "*", "SKILL.md"))
     if skills:
         tips.append(f"{len(skills)} user/project skill(s), ~30-100 tokens each for the description. Skills you only run by hand: add `disable-model-invocation: true`.")
@@ -296,8 +311,8 @@ def session_stats(path):
     """Usage deduped by message id (one transcript line per content block) plus content sizes."""
     s = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0,
          "text": 0, "code": 0, "caveman": False, "ponytail": False,
-         "reads": [], "graph_queries": [], "graph_results": 0}
-    seen, tool_names, results = set(), {}, {}
+         "reads": [], "graph_queries": [], "graph_results": 0, "noisy": [], "model_switches": 0}
+    seen, tool_names, tool_labels, results, model = set(), {}, {}, {}, None
     files = [path] + glob.glob(os.path.join(os.path.splitext(path)[0], "subagents", "*.jsonl"))
     for f in files:
         for line in (read(f) or "").splitlines():
@@ -320,6 +335,11 @@ def session_stats(path):
                 s["cache_write"] += usage.get("cache_creation_input_tokens") or 0
                 s["cache_read"] += usage.get("cache_read_input_tokens") or 0
                 s["output"] += usage.get("output_tokens") or 0
+                # Main thread only: subagents run other models on purpose. The cache is per model.
+                name = msg.get("model")
+                if f == path and name and not name.startswith("<"):
+                    s["model_switches"] += bool(model and name != model)
+                    model = name
             for block in msg.get("content") if isinstance(msg.get("content"), list) else []:
                 if not isinstance(block, dict):
                     continue
@@ -329,6 +349,8 @@ def session_stats(path):
                 elif kind == "tool_use":
                     name, args = block.get("name", ""), block.get("input") or {}
                     tool_names[block.get("id")] = name
+                    target = os.path.basename(str(args.get("file_path") or "")) or args.get("pattern") or ""
+                    tool_labels[block.get("id")] = str(args.get("command") or f"{name} {target}".strip())[:60]
                     if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
                         code = args.get("content") or args.get("new_string") or args.get("new_source") or ""
                         code += "".join(e.get("new_string", "") for e in args.get("edits") or [])
@@ -340,6 +362,7 @@ def session_stats(path):
                     results[block.get("tool_use_id")] = tokens(result_text(block.get("content")))
     s["reads"] = [n for i, n in results.items() if tool_names.get(i) == "Read"]
     s["graph_results"] = sum(results.get(i, 0) for i in s["graph_queries"])
+    s["noisy"] = sorted(((n, tool_labels.get(i, "?")) for i, n in results.items() if n >= NOISY), reverse=True)[:3]
     return s
 
 
@@ -377,6 +400,14 @@ def savings(path, cwd):
     if rows:
         print(f"  {'total':<9} {'~' + fmt(sum(r[1] for r in rows)):>7}")
     print(f"\n  prompt cache  {fmt(s['cache_read'])} input tokens billed at 10% (exact, built into Claude Code)")
+
+    if s["noisy"]:
+        print("\nBiggest tool outputs (re-read on every later call; use quiet flags or a subagent):")
+        for n, label in s["noisy"]:
+            print(f"  {fmt(n):>6}  {label}")
+    if s["model_switches"]:
+        print(f"\nModel switched {s['model_switches']}x: each switch re-writes the conversation to a new cache. "
+              "Pick /model and /effort at the start.")
 
     memory = sum(tokens(visible(t)) for _, t in always_loaded(cwd))
     if memory:

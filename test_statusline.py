@@ -74,6 +74,11 @@ cold = {"transcript_path": transcript, "context_window": {"used_percentage": 45}
 assert "/clear" in sl.render(cold, now=mtime + 3601) and "/compact" not in sl.render(cold, now=mtime + 3601)
 assert "/clear" not in sl.render(cold, now=mtime + 60)
 assert "/clear" not in sl.render(dict(cold, context_window={"used_percentage": 19}), now=mtime + 3601)
+# /compact while the cache is warm but about to expire (last 5 minutes of 1h), not while busy or below CLEAR_PCT
+warm = {"transcript_path": transcript, "context_window": {"used_percentage": 25}}
+assert "/compact" in sl.render(warm, now=mtime + 3600 - 120)
+assert "/compact" not in sl.render(warm, now=mtime + 3600 - 400)
+assert "/compact" not in sl.render(dict(warm, context_window={"used_percentage": 19}), now=mtime + 3600 - 120)
 # saved: saver.py's estimate on line 1, hidden with no transcript or nothing saved
 sp = os.path.join(sl.CLAUDE_DIR, "saved.jsonl")
 with open(sp, "w") as f:

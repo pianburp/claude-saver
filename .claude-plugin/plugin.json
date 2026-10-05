@@ -1,0 +1,9 @@
+{
+  "name": "token-saver",
+  "description": "Spend fewer tokens in Claude Code: status line with context, limits and prompt cache countdown, auto-compact at 50%, deny rules for generated folders, /token-audit and /savings.",
+  "author": { "name": "pianburp", "url": "https://github.com/pianburp" },
+  "homepage": "https://github.com/pianburp/claude-saver",
+  "repository": "https://github.com/pianburp/claude-saver",
+  "license": "MIT",
+  "keywords": ["tokens", "statusline", "context", "cost", "compact"]
+}

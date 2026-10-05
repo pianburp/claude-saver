@@ -12,10 +12,24 @@ Every API call re-sends your CLAUDE.md, memory, tool schemas and the whole conve
 claude-saver trims what gets re-sent, shows you when it's about to get expensive,
 and tells you what each saver actually saved. Pure Python stdlib, one install command, no daemon.
 
+In Claude Code:
+
+```
+/plugin marketplace add pianburp/claude-saver
+/plugin install token-saver@pianburp
+/token-saver:setup
+```
+
+`/token-saver:setup` finds a Python 3.8+ on your machine, lists every `settings.json` change and asks before writing.
+Add `--all` for the ponytail, caveman and graphify plugins: `/token-saver:setup --all`.
+After a plugin update, run `/token-saver:setup` again.
+
+Without the plugin, pipe the installer into Python (same flags):
+
 ```sh
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/pianburp/claude-saver/main/install.py | python3 -
-# Windows (PowerShell)
+# Windows (PowerShell). No `py` launcher? Use `python -` instead.
 irm https://raw.githubusercontent.com/pianburp/claude-saver/main/install.py | py -
 ```
 
@@ -32,8 +46,8 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
 | [`/savings`](#savings) | This session's tokens and what each saver saved | On demand |
 | [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | Opt-in |
-| [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--all`) |
-| [ponytail](https://github.com/DietrichGebert/ponytail) | Less code written: 80-94% fewer lines in its benchmark | Opt-in (`--all`) |
+| [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
+| [ponytail](https://github.com/DietrichGebert/ponytail) | Less code written: 80-94% fewer lines in its benchmark | Opt-in (`--with-plugins`, `--all`) |
 | [graphify](https://github.com/safishamsi/graphify) | Claude queries a code graph instead of re-reading files | Opt-in (`--all`) |
 
 caveman, ponytail and graphify are third-party projects. claude-saver only installs them and measures them.
@@ -52,6 +66,7 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 - **Line 2:** `ctx` is context used. `5h` and `7d` are your usage limits and when they reset.
 - Numbers go green, then yellow at 50%, then red at 80%. The context bar stays Claude orange under 50%.
 - `/compact` shows 10 points before auto-compact (40% by default). Compact at a clean break, not mid-task.
+- `/compact` also shows in the cache's last 5 minutes when context is over 20%. Compacting while the cache is warm is cheap. After it expires, the next message re-bills everything.
 - `/clear` replaces it once the cache has expired and context is over 20%. If you're switching tasks, starting fresh is cheaper.
 - Segments with no data are hidden.
 
@@ -103,7 +118,7 @@ Lists every file Claude Code loads each session (global and project CLAUDE.md, `
 - Files over 500 tokens, code blocks over 10 lines, stale paths, and lines repeated across files.
 - A MEMORY.md too long to load in full, and rules without `paths:` frontmatter (those load every session).
 - MCP servers, unblocked heavy folders, and a `.claudeignore` (Claude Code doesn't read it).
-- Subagents on your main model, no `## Compact instructions` section, and an unset `BASH_MAX_OUTPUT_LENGTH`.
+- Subagents on your main model (and custom agents with no `model:`), no `## Compact instructions` section, and an unset `BASH_MAX_OUTPUT_LENGTH`.
 - A 5-minute prompt cache when `ENABLE_PROMPT_CACHING_1H` is off.
 
 Claude then proposes cuts as diffs and applies only the ones you approve, after a `.bak` backup.
@@ -131,11 +146,28 @@ Saved **estimated
 - **graphify:** assumes each graph query replaced 5 file reads of this session's average size.
   This is a guess. For a real number on your repo, run `graphify benchmark`.
 
+It also lists the three biggest tool outputs (2k+ tokens) with their command.
+They stay in context and are re-read on every later call, so add quiet flags (`--reporter=dot`, `-q`) or run them in a subagent.
+It counts model switches too: the prompt cache is per model, so each switch re-writes the whole conversation.
+
 ## --orchestrate
 
 Sets `"model": "opusplan"`: Opus in plan mode (Shift+Tab twice), Sonnet once you execute.
 Also sets `CLAUDE_CODE_SUBAGENT_MODEL=haiku` for subagents with no model of their own.
 It's not part of `--all`, because it replaces your default model. Switch back any time with `/model`.
+
+## Habits
+
+The tools can't do these for you:
+
+- `/clear` between unrelated tasks. Old context is re-sent on every call.
+- `/rewind` to undo a recent wrong turn instead of `/compact`. Everything before it stays cached.
+- Pick `/model` and `/effort` at the start. Changing them mid-session rebuilds the cache.
+- @-mention files you know are relevant. It skips the search and Read calls.
+- Plan before you execute on anything non-trivial, and review the plan. Skip planning for one-line changes.
+- Put all constraints in the first prompt, and batch related changes into one request.
+- Run `/loop` in its own session, so each loop turn doesn't carry your main conversation.
+- For routine work, `MAX_THINKING_TOKENS=0` cuts thinking output. It lowers quality on hard problems, so it's not set for you.
 
 ## Install
 
@@ -157,10 +189,12 @@ Flags (they combine, e.g. `--all --orchestrate`). With the one-liner, put them a
 
 | Flag | Adds |
 |------|------|
-| `--with-plugins` | ponytail and caveman plugins. Claude Code asks once to install them on restart |
+| `--with-plugins` | ponytail and caveman, through the `claude` CLI. Without the CLI, the installer prints the `/plugin` commands to run |
 | `--graphify` | graphify via `uv` (or `pip --user`), then `graphify install` |
 | `--all` | Both of the above |
 | `--orchestrate` | opusplan + Haiku subagents |
+| `--yes` | Applies the `settings.json` changes without asking. Use it in scripts |
+| `--uninstall` | Removes what the installer added (see below) |
 
 New to Claude Code? Skip the plugins until you know the default behavior.
 caveman and ponytail change how Claude talks and codes in every project. Say `stop caveman` / `stop ponytail` to turn them off.
@@ -168,30 +202,32 @@ graphify pays off in big repos: run `/graphify` once to build the graph. All thr
 
 What the installer touches:
 
-1. Copies `statusline.py` and `saver.py` to `~/.claude/`.
-2. Writes the `/token-audit` and `/savings` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
+1. Lists every `settings.json` change and asks `Apply? [Y/n]`. Answering no leaves every file as it was.
+   With no terminal to ask (output redirected), it applies them.
+2. Copies `statusline.py` and `saver.py` to `~/.claude/`.
+3. Writes the `/token-audit` and `/savings` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
    They cost no tokens until you type them.
-3. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
-4. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules and the startup hook.
+4. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
+5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules and the startup hook.
    It keeps your values for everything except `statusLine` (and `model` with `--orchestrate`).
 
-**Update:** re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
+**Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/token-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
 
-**Uninstall:**
+**Uninstall:** `/token-saver:setup --uninstall`, then `/plugin uninstall token-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
 
-1. Delete `~/.claude/statusline.py`, `~/.claude/saver.py`, `~/.claude/.statusline-ctx/`,
-   `~/.claude/skills/token-audit/` and `~/.claude/skills/savings/`.
-2. In `~/.claude/settings.json`, remove `statusLine`, the `saver.py` `SessionStart` hook,
-   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and the `Read(**/…)` deny rules.
-   With `--orchestrate`, also remove `model` and `CLAUDE_CODE_SUBAGENT_MODEL`.
-   Restoring `settings.json.bak` works too, but it drops every setting changed since the install.
-3. Optional: remove the plugins via `/plugin`, and graphify with `graphify uninstall`.
+- It shows the `settings.json` changes and asks first, like the install does.
+- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` and the two skills from `~/.claude/`.
+- From `settings.json` it removes `statusLine`, the startup hook and the deny rules.
+  It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold the installer's values. Values you set yourself stay.
+- The plugins stay. Remove them via `/plugin`, and graphify with `graphify uninstall`.
 
 ### Troubleshooting
 
 - **No status line:** copy `statusLine.command` from `~/.claude/settings.json` and run it as `echo {} | <command>`.
   It should print a line starting with `✻`.
 - **`command not found` / `No such file`:** Python moved. Re-run the installer.
+- **`cave no plugin`:** caveman is installed as plain skills (e.g. `npx skills add`), which write no mode flag.
+  Re-run the installer with `--with-plugins`, then delete the `cave*` folders it lists from `~/.claude/skills/`.
 - **Boxes or `?` instead of `✻ ⎿ █ ◷`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
 
 ## Settings
@@ -209,6 +245,7 @@ What the installer touches:
 
 | File | Role |
 |------|------|
+| `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/token-saver:setup`, which runs `install.py` from the plugin folder. |
 | `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
 | `saver.py` | `audit`, `check` and `savings`. Reads instruction files, settings and session transcripts (`~/.claude/projects/*/*.jsonl`). Never writes. |
@@ -248,6 +285,7 @@ The automatic checks and audit tips come from these:
 - [Claude Code token efficiency](https://www.firecrawl.dev/blog/claude-code-token-efficiency) (Firecrawl)
 - [Maximizing the value of your Claude Code sessions](https://claude.com/blog/maximizing-the-value-of-your-claude-code-sessions) (Anthropic)
 - [How to save tokens](https://mydataschool.com/blog/how-to-save-tokens/) (mydataschool)
+- [Save tokens with Opus plan mode](https://www.mindstudio.ai/blog/save-tokens-claude-code-opus-plan-mode) (MindStudio)
 - [10 tips to stop burning your tokens in Claude Code](https://medium.com/@habib23me/10-tip-to-stop-burning-your-tokens-in-claude-code-4776d4ac8956)
 
 ## License

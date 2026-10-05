@@ -42,6 +42,21 @@ assert (s["calls"], s["input"], s["output"]) == (1, 5, 100), s
 assert s["caveman"] and not s["ponytail"] and s["text"] == 100
 assert s["graph_queries"] == ["t1"] and s["graph_results"] == 200
 assert [r[0] for r in saver.saved_rows(s)] == ["caveman", "graphify"]
+# savings: big tool outputs listed with their command; model switches on the main thread counted
+big = [
+    {"message": {"id": "a", "role": "assistant", "model": "claude-opus-5-5", "usage": {},
+                 "content": [{"type": "tool_use", "id": "n1", "name": "Bash", "input": {"command": "npm test"}}]}},
+    {"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "n1", "content": "c" * 12000}]}},
+    {"message": {"id": "b", "role": "assistant", "model": "claude-sonnet-5-5", "usage": {}, "content": []}},
+    {"message": {"id": "c", "role": "assistant", "model": "<synthetic>", "usage": {}, "content": []}},
+    {"message": {"id": "d", "role": "assistant", "model": "claude-sonnet-5-5", "usage": {}, "content": []}},
+]
+bp = os.path.join(home, "big.jsonl")
+with open(bp, "w") as f:
+    f.write("\n".join(json.dumps(x) for x in big))
+b = saver.session_stats(bp)
+assert b["noisy"] == [(3000, "npm test")] and b["model_switches"] == 1, b
+assert s["noisy"] == [] and s["model_switches"] == 0
 # AGENTS.md loads only when no CLAUDE.md exists in cwd or above
 bare = os.path.join(home, "bare")
 os.makedirs(bare)
@@ -98,6 +113,11 @@ out = audit_out(cwd)
 assert "Compact instructions" in out and "BASH_MAX_OUTPUT_LENGTH" in out and "ENABLE_PROMPT_CACHING_1H" in out, out
 open(os.path.join(cwd, "CLAUDE.md"), "a").write("\n## Compact instructions\nKeep test output.\n")
 os.environ["BASH_MAX_OUTPUT_LENGTH"] = os.environ["ENABLE_PROMPT_CACHING_1H"] = "1"
+os.makedirs(os.path.join(cwd, ".claude", "agents"))
+open(os.path.join(cwd, ".claude", "agents", "scout.md"), "w").write("---\nname: scout\n---\nx")
+open(os.path.join(cwd, ".claude", "agents", "pinned.md"), "w").write("---\nmodel: haiku\n---\nx")
+assert saver.unpinned_agents(cwd) == ["scout"]
+assert "`model: haiku` to these agents: scout" in audit_out(cwd)
 out = audit_out(cwd)
 assert "Compact instructions" not in out and "BASH_MAX" not in out and "CACHING_1H" not in out, out
 
@@ -113,4 +133,25 @@ assert "model" not in install.apply_settings({}, [], "py", "/c/statusline.py")
 st = {"permissions": {"deny": ["Read(**/node_modules/**)", "Bash(rm:*)"]}}
 install.apply_settings(st, [], "py", "/c/statusline.py")
 assert st["permissions"]["deny"][:2] == ["Read(**/node_modules/**)", "Bash(rm:*)"] and len(st["permissions"]["deny"]) == len(install.DENY_READS) + 1
+# install: plugins only with --with-plugins or --all; standalone copies flagged
+assert install.apply_settings({}, ["--all"], "py", "/c/s.py")["enabledPlugins"] == {"ponytail@ponytail": True, "caveman@caveman": True}
+assert "enabledPlugins" not in install.apply_settings({}, [], "py", "/c/s.py")
+# uninstall: install then uninstall leaves the user's own values; changes() lists what moves
+mine = {"env": {"FOO": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"}, "permissions": {"deny": ["Bash(rm:*)"]},
+        "hooks": {"SessionStart": [{"hooks": [{"command": "mine.sh"}]}]}}
+st = install.apply_settings(json.loads(json.dumps(mine)), ["--orchestrate"], "py", "/c/statusline.py")
+diff = install.changes(mine, st)
+assert "+ model: \"opusplan\"" in diff and "+ permissions.deny: \"Read(**/.env)\"" in diff and not any("FOO" in d for d in diff), diff
+assert install.remove_settings(st) == dict(mine, env={"FOO": "1", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"}), st
+assert install.changes(mine, mine) == []
+skills = os.path.join(home, "skills")
+os.makedirs(os.path.join(skills, "caveman"))
+os.makedirs(os.path.join(skills, "savings"))
+hooked = {"hooks": {"SessionStart": [{"hooks": [{"command": "python caveman-start.py"}]}]}}
+found = install.conflicts(hooked, skills)
+assert len(found) == 2 and "caveman" in found[0] and "savings" not in found[0] and "caveman-start" in found[1], found
+assert install.conflicts({}, os.path.join(home, "nope")) == []
+# graphify: pip --user's scripts dir is searched, not only ~/.local/bin (wrong on Windows)
+import site
+assert any(d.startswith(site.getuserbase()) for d in install.graphify_dirs()), install.graphify_dirs()
 print("ok")
