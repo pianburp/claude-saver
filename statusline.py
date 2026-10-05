@@ -31,11 +31,14 @@ RED = 167
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 BAR_WIDTH = 10
 GLOW_SECS = 15
+ROLL_SECS = 3  # a rising number counts up from its old value over this long
 PEACH = 223  # glow start; fades smoothly into the segment's own color
 PULSE = (RED, 131, 95, 131)
 BUSY_SECS = 10
 CLEAR_PCT = 20  # cold cache past this much context: the next message re-bills it all, /clear is cheaper
 SPINNER = "·✢✳✶✻✽✻✶✳✢"  # forward then back, like Claude Code's own
+EFFORT = {"low": "lo", "medium": "med", "high": "hi", "xhigh": "xhi"}
+CLOCK = "◷ "  # prompt cache countdown
 SESSION_RE = r"[A-Za-z0-9_-]{1,128}"
 
 
@@ -135,9 +138,12 @@ def track(state, key, value, now):
 
 
 def rose(state, key, value, now):
-    """Age of the change if the value went up, else None."""
+    """(value to show, age of the rise): counts up from the old value over ROLL_SECS. Drops show at once."""
     hit = track(state, key, value, now)
-    return hit[1] if hit and hit[0] < value else None
+    if not hit or hit[0] >= value:
+        return value, None
+    old, age = hit
+    return old + (value - old) * min(1, age / ROLL_SECS), age
 
 
 def fmt_reset(epoch):
@@ -157,12 +163,34 @@ def fmt_limit(name, window, state, now):
     pct = to_pct((window or {}).get("used_percentage"))
     if pct is None:
         return ""
-    color = glow(rose(state, name, round(pct), now), level_color(pct))
-    out = label(name) + " " + paint(f"{pct:.0f}%", color)
+    shown, age = rose(state, name, round(pct), now)
+    out = label(name) + " " + paint(f"{shown:.0f}%", glow(age, level_color(pct)))
     reset = fmt_reset((window or {}).get("resets_at"))
     if reset:
         out += " " + label(reset)
     return out
+
+
+def fmt_saved(transcript_path, state, now):
+    """'saved ~18.3k' from saver.py's estimate; re-parsed only when the transcript changes."""
+    try:
+        st = os.stat(transcript_path)
+        import saver  # installed next to this file
+    except (OSError, TypeError, ValueError, ImportError):
+        return ""
+    key = [st.st_mtime, st.st_size]
+    if state.get("saved_key") != key:
+        # ponytail: full transcript parse per new message; parse only appended bytes if long sessions lag
+        try:
+            state["saved_n"] = int(sum(r[1] for r in saver.saved_rows(saver.session_stats(transcript_path))))
+        except Exception:
+            state["saved_n"] = 0
+        state["saved_key"] = key
+    n = state.get("saved_n") or 0
+    if not n:
+        return ""
+    shown, age = rose(state, "saved", n, now)
+    return label("saved ") + paint("~" + saver.fmt(shown), glow(age, GREEN))
 
 
 def compact_pct():
@@ -209,12 +237,12 @@ def fmt_cache(idle, frame, ttl=3600):
         return ""
     left = ttl - idle
     if left < 1:
-        return label("cache ") + paint("cold", RED)
+        return label(CLOCK) + paint("cold", RED)
     m, s = divmod(int(left), 60)
     text = f"{m}m" if m else f"{s}s"
     if left <= 300:
-        return label("cache ") + paint(text, PULSE[frame % len(PULSE)])
-    return label("cache ") + paint(text, GREEN if left > ttl / 2 else YELLOW)
+        return label(CLOCK) + paint(text, PULSE[frame % len(PULSE)])
+    return label(CLOCK) + paint(text, GREEN if left > ttl / 2 else YELLOW)
 
 
 def read_flag(path):
@@ -300,10 +328,12 @@ def render(data, now=None):
     ttl = cache_ttl(data.get("transcript_path")) if idle is not None else 3600
     modes = read_modes(session_id)
     hit = track(state, "modes", str(modes), now)
+    effort = read_effort(data, cwd, model.get("id"))
     line1 = [
         paint(star + " " + (model.get("display_name") or model.get("id") or "Claude"), CLAUDE, bold=True),
-        paint(read_effort(data, cwd, model.get("id")), GRAY),
+        paint(EFFORT.get(effort, effort), GRAY),
         fmt_modes(modes, hit[1] if hit else None),
+        fmt_saved(data.get("transcript_path"), state, now),
         fmt_cache(idle, frame, ttl),
     ]
 
@@ -314,7 +344,8 @@ def render(data, now=None):
         cells = math.ceil(ctx / 100 * BAR_WIDTH)
         hit = track(state, "ctx", cells, now)
         glow_from, age = hit if hit and hit[0] < cells else (None, None)
-        ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{ctx:.0f}%", level_color(ctx))
+        shown, _ = rose(state, "ctx_pct", round(ctx), now)
+        ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{shown:.0f}%", level_color(ctx))
         # 10 points before auto-compact: compact by hand at a clean break instead of mid-task.
         if idle is not None and idle >= ttl and ctx >= CLEAR_PCT:
             ctx_part += " " + paint("/clear", YELLOW)

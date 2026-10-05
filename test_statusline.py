@@ -16,8 +16,10 @@ assert sl.track(st, "k", 4, now=1) is None  # unchanged
 assert sl.track(st, "k", 6, now=2) == (4, 0)  # changed
 assert sl.track(st, "k", 6, now=16) == (4, 14)  # still within GLOW_SECS
 assert sl.track(st, "k", 6, now=17) is None  # expired
-assert sl.rose(st, "k", 2, now=18) is None  # drop (e.g. /compact) never glows
-assert sl.rose(st, "k", 3, now=19) == 0
+assert sl.rose(st, "k", 2, now=18) == (2, None)  # drop (e.g. /compact) shows at once, never glows
+assert sl.rose(st, "k", 8, now=19) == (2, 0)  # rise counts up from the old value...
+assert sl.rose(st, "k", 8, now=20.5) == (5, 1.5)  # ...halfway at ROLL_SECS / 2...
+assert sl.rose(st, "k", 8, now=23) == (8, 4)  # ...then holds while it glows
 
 # glow: starts at PEACH, drifts steadily toward base, lands on it (no snap)
 for base in (sl.GREEN, sl.RED, sl.GRAY, sl.CLAUDE):
@@ -72,6 +74,17 @@ cold = {"transcript_path": transcript, "context_window": {"used_percentage": 45}
 assert "/clear" in sl.render(cold, now=mtime + 3601) and "/compact" not in sl.render(cold, now=mtime + 3601)
 assert "/clear" not in sl.render(cold, now=mtime + 60)
 assert "/clear" not in sl.render(dict(cold, context_window={"used_percentage": 19}), now=mtime + 3601)
+# saved: saver.py's estimate on line 1, hidden with no transcript or nothing saved
+sp = os.path.join(sl.CLAUDE_DIR, "saved.jsonl")
+with open(sp, "w") as f:
+    f.write('{"message":{"role":"user","content":"CAVEMAN MODE ACTIVE"}}\n')
+    f.write('{"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"' + "a" * 4000 + '"}]}}\n')
+assert "saved ~1.9k" in sl.render({"transcript_path": sp}), sl.render({"transcript_path": sp})
+assert "saved" not in sl.render({}) and "saved" not in sl.render({"transcript_path": tp})
+# effort abbreviated, unknown levels passed through; cache shown as a clock
+assert "xhi" in sl.render({"effort": "xhigh"}) and "xhigh" not in sl.render({"effort": "xhigh"})
+assert "max" in sl.render({"effort": "max"})
+assert sl.fmt_cache(60, frame=0).startswith(sl.CLOCK) and "cache" not in sl.fmt_cache(60, frame=0)
 # bar: any nonzero usage shows at least one cell
 assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == 10
 print("ok")

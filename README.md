@@ -42,11 +42,12 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 ## Status line
 
 ```
-✻ Opus 5.5  ·  high  ·  pony full + cave  ·  cache 59m
+✻ Opus 5.5  ·  hi  ·  pony full + cave  ·  saved ~18.3k  ·  ◷ 59m
   ⎿  ctx ███░░░░░░░ 31%  ·  5h 63% 12:51p  ·  7d 91% Thu 10:11p
 ```
 
-- **Line 1:** model, effort, active ponytail/caveman modes, and `cache`: time until the prompt cache expires.
+- **Line 1:** model, effort (`lo`, `med`, `hi`, `xhi`, `max`), active ponytail/caveman modes, `saved` (estimated tokens saved this session, the `total` row of [`/savings`](#savings)),
+  and `◷`: time until the prompt cache expires.
   After that, the next message re-reads the whole conversation at full price.
 - **Line 2:** `ctx` is context used. `5h` and `7d` are your usage limits and when they reset.
 - Numbers go green, then yellow at 50%, then red at 80%. The context bar stays Claude orange under 50%.
@@ -55,10 +56,10 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 - Segments with no data are hidden.
 
 It redraws every second. Animation follows the clock, so bursts of redraws don't speed it up:
-`✻` spins while Claude works, rising values glow peach and fade over 15 seconds,
-and `cache` pulses red in its last 5 minutes.
+`✻` spins while Claude works, rising numbers count up over 3 seconds and glow peach for 15,
+and `◷` pulses red in its last 5 minutes.
 
-Only Claude Code's own glyphs (`✻ ⎿ █ ░ ·`) are used. No Nerd Font needed.
+Only plain Unicode glyphs (`✻ ⎿ █ ░ · ◷`) are used. No Nerd Font needed.
 
 ## Automatic
 
@@ -191,7 +192,7 @@ What the installer touches:
 - **No status line:** copy `statusLine.command` from `~/.claude/settings.json` and run it as `echo {} | <command>`.
   It should print a line starting with `✻`.
 - **`command not found` / `No such file`:** Python moved. Re-run the installer.
-- **Boxes or `?` instead of `✻ ⎿ █`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
+- **Boxes or `?` instead of `✻ ⎿ █ ◷`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
 
 ## Settings
 
@@ -212,6 +213,7 @@ What the installer touches:
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
 | `saver.py` | `audit`, `check` and `savings`. Reads instruction files, settings and session transcripts (`~/.claude/projects/*/*.jsonl`). Never writes. |
 | `test_*.py` | Plain `assert` tests, no framework. |
+| `demo.py` | Plays the status line animations with fake data in a temp dir. Not installed. |
 | `.github/workflows/upstream.yml` | Weekly job that fails if caveman, ponytail or graphify rename a flag file or marker that claude-saver reads. |
 
 Token counts are `chars / 4`, the same approximation graphify and most tools use. Exact numbers come only from transcript `usage` fields.
@@ -220,6 +222,7 @@ Token counts are `chars / 4`, the same approximation graphify and most tools use
 
 ```sh
 python3 test_saver.py && python3 test_statusline.py      # both print "ok"
+python3 demo.py                                          # watch every animation with fake data (15s)
 
 # try the status line with fake input
 echo '{"model":{"display_name":"Opus"},"context_window":{"used_percentage":42}}' | python3 statusline.py

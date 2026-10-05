@@ -41,6 +41,7 @@ s = saver.session_stats(transcript)
 assert (s["calls"], s["input"], s["output"]) == (1, 5, 100), s
 assert s["caveman"] and not s["ponytail"] and s["text"] == 100
 assert s["graph_queries"] == ["t1"] and s["graph_results"] == 200
+assert [r[0] for r in saver.saved_rows(s)] == ["caveman", "graphify"]
 # AGENTS.md loads only when no CLAUDE.md exists in cwd or above
 bare = os.path.join(home, "bare")
 os.makedirs(bare)

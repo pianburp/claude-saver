@@ -343,14 +343,8 @@ def session_stats(path):
     return s
 
 
-def savings(path, cwd):
-    if not path or not os.path.isfile(path):
-        sys.exit("No session transcript found. Pass its path: saver.py savings FILE.jsonl")
-    s = session_stats(path)
-    print(f"Session {os.path.basename(path)[:8]}: {s['calls']} API calls")
-    print(f"  used     input {fmt(s['input'])} · cache write {fmt(s['cache_write'])} · "
-          f"cache read {fmt(s['cache_read'])} · output {fmt(s['output'])}\n")
-
+def saved_rows(s):
+    """Estimated savings as (name, tokens, kind, why); shared by /savings and the status line."""
     rows = []
     if s["caveman"] and s["text"]:
         rows.append(("caveman", s["text"] * CAVEMAN_CUT / (1 - CAVEMAN_CUT), "output",
@@ -363,6 +357,18 @@ def savings(path, cwd):
         saved = max(0, len(s["graph_queries"]) * GRAPHIFY_READS_AVOIDED * per_read - s["graph_results"])
         rows.append(("graphify", saved, "input",
                      f"{len(s['graph_queries'])} queries × {GRAPHIFY_READS_AVOIDED} reads of ~{fmt(per_read)} avoided (assumption)"))
+    return rows
+
+
+def savings(path, cwd):
+    if not path or not os.path.isfile(path):
+        sys.exit("No session transcript found. Pass its path: saver.py savings FILE.jsonl")
+    s = session_stats(path)
+    print(f"Session {os.path.basename(path)[:8]}: {s['calls']} API calls")
+    print(f"  used     input {fmt(s['input'])} · cache write {fmt(s['cache_write'])} · "
+          f"cache read {fmt(s['cache_read'])} · output {fmt(s['output'])}\n")
+
+    rows = saved_rows(s)
     print("Saved **estimated")
     if not rows:
         print("  nothing yet: caveman, ponytail and graphify were not used in this session")
