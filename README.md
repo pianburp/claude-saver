@@ -16,13 +16,13 @@ In Claude Code:
 
 ```
 /plugin marketplace add pianburp/claude-saver
-/plugin install token-saver@pianburp
-/token-saver:setup
+/plugin install ctx-saver@pianburp
+/ctx-saver:setup
 ```
 
-`/token-saver:setup` finds a Python 3.8+ on your machine, lists every `settings.json` change and asks before writing.
-Add `--all` for the ponytail, caveman and graphify plugins: `/token-saver:setup --all`.
-After a plugin update, run `/token-saver:setup` again.
+`/ctx-saver:setup` finds a Python 3.8+ on your machine, lists every `settings.json` change and asks before writing.
+Add `--all` for the ponytail, caveman and graphify plugins: `/ctx-saver:setup --all`.
+After a plugin update, run `/ctx-saver:setup` again.
 
 Without the plugin, pipe the installer into Python (same flags):
 
@@ -211,9 +211,9 @@ What the installer touches:
 5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules and the startup hook.
    It keeps your values for everything except `statusLine` (and `model` with `--orchestrate`).
 
-**Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/token-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
+**Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/ctx-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
 
-**Uninstall:** `/token-saver:setup --uninstall`, then `/plugin uninstall token-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
+**Uninstall:** `/ctx-saver:setup --uninstall`, then `/plugin uninstall ctx-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
 
 - It shows the `settings.json` changes and asks first, like the install does.
 - It removes `statusline.py`, `saver.py`, `.statusline-ctx/` and the two skills from `~/.claude/`.
@@ -245,7 +245,7 @@ What the installer touches:
 
 | File | Role |
 |------|------|
-| `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/token-saver:setup`, which runs `install.py` from the plugin folder. |
+| `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/ctx-saver:setup`, which runs `install.py` from the plugin folder. |
 | `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
 | `saver.py` | `audit`, `check` and `savings`. Reads instruction files, settings and session transcripts (`~/.claude/projects/*/*.jsonl`). Never writes. |

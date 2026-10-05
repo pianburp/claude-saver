@@ -1,5 +1,6 @@
 {
-  "name": "token-saver",
+  "name": "ctx-saver",
+  "version": "1.0.0",
   "description": "Spend fewer tokens in Claude Code: status line with context, limits and prompt cache countdown, auto-compact at 50%, deny rules for generated folders, /token-audit and /savings.",
   "author": { "name": "pianburp", "url": "https://github.com/pianburp" },
   "homepage": "https://github.com/pianburp/claude-saver",

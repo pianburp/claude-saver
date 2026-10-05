@@ -10,4 +10,4 @@ disable-model-invocation: true
    None found: tell the user to install Python 3.8+ and stop.
 2. Run `<python> "${CLAUDE_PLUGIN_ROOT}/install.py" --dry-run $ARGUMENTS` and show its output in a code block.
 3. Ask the user to apply those changes. On yes, run `<python> "${CLAUDE_PLUGIN_ROOT}/install.py" --yes $ARGUMENTS`.
-4. Tell the user to restart Claude Code, and to run `/token-saver:setup` again after a plugin update to refresh the status line scripts.
+4. Tell the user to restart Claude Code, and to run `/ctx-saver:setup` again after a plugin update to refresh the status line scripts.
