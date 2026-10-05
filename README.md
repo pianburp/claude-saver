@@ -1,5 +1,4 @@
 ![claude-saver status line in Claude Code](image.png)
-<p align="center"><img src="image-1.png" alt="claude-saver status line in Claude Code2"></p>
 
 # claude-saver
 
@@ -45,6 +44,7 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 ✻ Opus 5.5  ·  hi  ·  pony full + cave  ·  saved ~18.3k  ·  ◷ 59m
   ⎿  ctx ███░░░░░░░ 31%  ·  5h 63% 12:51p  ·  7d 91% Thu 10:11p
 ```
+<p align="center"><img src="image-1.png" alt="claude-saver status line in Claude Code2"></p>
 
 - **Line 1:** model, effort (`lo`, `med`, `hi`, `xhi`, `max`), active ponytail/caveman modes, `saved` (estimated tokens saved this session, the `total` row of [`/savings`](#savings)),
   and `◷`: time until the prompt cache expires.
