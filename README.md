@@ -43,9 +43,11 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [Auto-compact at 50%](#auto-compact) | Compacts at half the window instead of near full | Automatic |
 | [Deny rules](#deny-rules) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `.env`, `.env.local`, `.env.*.local` | Automatic |
 | [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Automatic |
+| [Output guard](#output-guard) | Tells Claude when a Bash output is 2k+ tokens, so it uses quiet flags next time | Automatic |
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
-| [`/savings`](#savings) | This session's tokens and what each saver saved | On demand |
+| [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | On demand |
 | [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | Opt-in |
+| [`--pet`](#pet) | A status line pet that eats the tokens you save | Opt-in |
 | [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
 | [ponytail](https://github.com/DietrichGebert/ponytail) | Less code written: 80-94% fewer lines in its benchmark | Opt-in (`--with-plugins`, `--all`) |
 | [graphify](https://github.com/safishamsi/graphify) | Claude queries a code graph instead of re-reading files | Opt-in (`--all`) |
@@ -55,15 +57,14 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 ## Status line
 
 ```
-✻ Opus 5.5  ·  hi  ·  pony full + cave  ·  saved ~18.3k  ·  ◷ 59m
-  ⎿  ctx ███░░░░░░░ 31%  ·  5h 63% 12:51p  ·  7d 91% Thu 10:11p
+✻ Opus 5.5 · hi · pony full + cave · saved ~18.3k
+⎿ ctx ██░░░░ 31% · 5h 63% 12:51p · 7d 91% Thu · ● 52m
 ```
-<p align="center"><img src="image-1.png" alt="claude-saver status line in Claude Code2"></p>
 
-- **Line 1:** model, effort (`lo`, `med`, `hi`, `xhi`, `max`), active ponytail/caveman modes, `saved` (estimated tokens saved this session, the `total` row of [`/savings`](#savings)),
-  and `◷`: time until the prompt cache expires.
+- **Line 1:** model, effort (`lo`, `med`, `hi`, `xhi`, `max`), active ponytail/caveman modes, `saved` (estimated tokens saved this session, the `total` row of [`/savings`](#savings)).
+- **Line 2:** `ctx` is context used. `5h` and `7d` are your usage limits and when they reset: the time when under 24h away, else the day.
+  `● 52m` is time left on the prompt cache. The pie drains `● ◕ ◑ ◔` as it runs down, gray until its last 5 minutes, `○ cold` once it expires.
   After that, the next message re-reads the whole conversation at full price.
-- **Line 2:** `ctx` is context used. `5h` and `7d` are your usage limits and when they reset.
 - Numbers go green, then yellow at 50%, then red at 80%. The context bar stays Claude orange under 50%.
 - `/compact` shows 10 points before auto-compact (40% by default). Compact at a clean break, not mid-task.
 - `/compact` also shows in the cache's last 5 minutes when context is over 20%. Compacting while the cache is warm is cheap. After it expires, the next message re-bills everything.
@@ -72,9 +73,34 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 
 It redraws every second. Animation follows the clock, so bursts of redraws don't speed it up:
 `✻` spins while Claude works, rising numbers count up over 3 seconds and glow peach for 15,
-and `◷` pulses red in its last 5 minutes.
+and the cache timer pulses red in its last 5 minutes.
 
-Only plain Unicode glyphs (`✻ ⎿ █ ░ · ◷`) are used. No Nerd Font needed.
+Only plain Unicode glyphs (`✻ ⎿ █ ░ · ●`) are used. No Nerd Font needed.
+
+### Pet
+
+`/ctx-saver:setup --pet` puts Clawd, Claude Code's mascot, left of the status line, three rows tall as on Claude Code's welcome banner.
+It eats the `saved` count from every session.
+It costs no tokens: the status line is never sent to the model.
+The status line credits each session's savings to `~/.claude/.statusline-ctx/ledger.json`, pet or not.
+`/pet` shows its stage, age, lifetime savings and progress to the next stage.
+
+![Clawd's stages: an egg under 5k, cracked at 5k, hatched at 10k, one sparkle at 250k, two at 2.5M](pet.svg)
+
+It glows when it grows. Its eyes, arms and color follow the session, first match wins:
+
+| Clawd | When |
+|-------|------|
+| `▚ ▞` eyes, red | A tool output of 2k+ tokens just landed (15 seconds) |
+| `▀ ▀` eyes and `z`, gray | Cache cold: asleep |
+| red | Context in `/compact` range |
+| pulsing red | Cache in its last 5 minutes |
+| arms wave `▝▜█████▛▘` / `▗▟█████▙▖` | Claude working. The egg rocks |
+| orange, blinking every 7 seconds | Otherwise |
+
+It takes 11 columns, so the rest of the status line shifts right.
+
+`--uninstall` deletes `.statusline-ctx/`, pet included.
 
 ## Automatic
 
@@ -107,6 +133,16 @@ A `SessionStart` hook (new sessions only) runs `saver.py check`. It prints nothi
 - Project MCP servers (`.mcp.json`) are configured while `ENABLE_TOOL_SEARCH` is off, so every tool schema loads up front.
 
 When it does print, it's one line (~40 tokens) telling Claude to suggest `/token-audit`.
+
+### Output guard
+
+A `PostToolUse` hook on Bash runs `saver.py guard`. When a command prints 2k+ tokens, Claude gets one line (~40 tokens):
+
+```
+claude-saver: `npm test` printed ~7.5k tokens, re-sent on every later call. Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.
+```
+
+The count stops at `BASH_MAX_OUTPUT_LENGTH` (30000 chars by default), the most Claude sees. Smaller outputs print nothing.
 
 ## On demand
 
@@ -149,6 +185,19 @@ Saved **estimated
 It also lists the three biggest tool outputs (2k+ tokens) with their command.
 They stay in context and are re-read on every later call, so add quiet flags (`--reporter=dot`, `-q`) or run them in a subagent.
 It counts model switches too: the prompt cache is per model, so each switch re-writes the whole conversation.
+
+`/savings --week` shows tokens saved per day over the last 7 days, from the ledger the status line keeps:
+
+```
+Saved per day **estimated, recorded by the status line
+  Tue 09-29  ████████              ~8.1k
+  Wed 09-30                        -
+  ...
+  Mon 10-05  ████████████████████  ~20.4k
+  total                            ~61.3k
+```
+
+Only sessions with the status line running count.
 
 ## --orchestrate
 
@@ -193,6 +242,7 @@ Flags (they combine, e.g. `--all --orchestrate`). With the one-liner, put them a
 | `--graphify` | graphify via `uv` (or `pip --user`), then `graphify install` |
 | `--all` | Both of the above |
 | `--orchestrate` | opusplan + Haiku subagents |
+| `--pet` | A [pet](#pet) left of the status line |
 | `--yes` | Applies the `settings.json` changes without asking. Use it in scripts |
 | `--uninstall` | Removes what the installer added (see below) |
 
@@ -208,7 +258,7 @@ What the installer touches:
 3. Writes the `/token-audit` and `/savings` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
    They cost no tokens until you type them.
 4. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
-5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules and the startup hook.
+5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules, the startup hook and the output guard hook.
    It keeps your values for everything except `statusLine` (and `model` with `--orchestrate`).
 
 **Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/ctx-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
@@ -216,8 +266,8 @@ What the installer touches:
 **Uninstall:** `/ctx-saver:setup --uninstall`, then `/plugin uninstall ctx-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
 
 - It shows the `settings.json` changes and asks first, like the install does.
-- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` and the two skills from `~/.claude/`.
-- From `settings.json` it removes `statusLine`, the startup hook and the deny rules.
+- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the three skills from `~/.claude/`.
+- From `settings.json` it removes `statusLine`, both hooks and the deny rules.
   It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold the installer's values. Values you set yourself stay.
 - The plugins stay. Remove them via `/plugin`, and graphify with `graphify uninstall`.
 
@@ -228,7 +278,7 @@ What the installer touches:
 - **`command not found` / `No such file`:** Python moved. Re-run the installer.
 - **`cave no plugin`:** caveman is installed as plain skills (e.g. `npx skills add`), which write no mode flag.
   Re-run the installer with `--with-plugins`, then delete the `cave*` folders it lists from `~/.claude/skills/`.
-- **Boxes or `?` instead of `✻ ⎿ █ ◷`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
+- **Boxes or `?` instead of `✻ ⎿ █ ▐▛`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
 
 ## Settings
 
@@ -248,7 +298,7 @@ What the installer touches:
 | `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/ctx-saver:setup`, which runs `install.py` from the plugin folder. |
 | `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
-| `saver.py` | `audit`, `check` and `savings`. Reads instruction files, settings and session transcripts (`~/.claude/projects/*/*.jsonl`). Never writes. |
+| `saver.py` | `audit`, `check`, `savings`, `pet` and `guard`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Never writes. |
 | `test_*.py` | Plain `assert` tests, no framework. |
 | `demo.py` | Plays the status line animations with fake data in a temp dir. Not installed. |
 | `.github/workflows/upstream.yml` | Weekly job that fails if caveman, ponytail or graphify rename a flag file or marker that claude-saver reads. |

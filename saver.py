@@ -4,6 +4,9 @@
   saver.py audit            what loads before you type: CLAUDE.md, memory, rules, MCP, ignores
   saver.py check            one line if those files need trimming, else nothing (SessionStart hook)
   saver.py savings [FILE]   this session's token use and estimated savings (default: newest transcript)
+  saver.py savings --week   tokens saved per day over the last 7 days (recorded by the status line)
+  saver.py pet              the status line pet: stage, age, lifetime tokens saved
+  saver.py guard            tells Claude when a Bash output is 2k+ tokens (PostToolUse hook)
 
 Token counts are chars/4, the same approximation graphify and most tools use.
 """
@@ -13,6 +16,8 @@ import json
 import os
 import re
 import sys
+import time
+from datetime import date, timedelta
 
 from statusline import detect_ttl
 
@@ -359,6 +364,7 @@ def session_stats(path):
                     results[block.get("tool_use_id")] = tokens(result_text(block.get("content")))
     s["reads"] = [n for i, n in results.items() if tool_names.get(i) == "Read"]
     s["graph_results"] = sum(results.get(i, 0) for i in s["graph_queries"])
+    s["noisy_count"] = sum(n >= NOISY for n in results.values())
     s["noisy"] = sorted(((n, tool_labels.get(i, "?")) for i, n in results.items() if n >= NOISY), reverse=True)[:3]
     return s
 
@@ -412,6 +418,58 @@ def savings(path, cwd):
               f"~{fmt(memory * s['calls'])}. Run /token-audit to trim it.")
 
 
+def ledger():
+    """The status line's record of tokens saved: {"total", "born", "days": {"YYYY-MM-DD": n}}."""
+    data = load_json(os.path.join(CLAUDE_DIR, ".statusline-ctx", "ledger.json"))
+    return data if isinstance(data, dict) else {}
+
+
+def week(today=None):
+    days = ledger().get("days") or {}
+    today = today or date.today()
+    rows = [(d, days.get(d.isoformat()) or 0) for d in (today - timedelta(i) for i in range(6, -1, -1))]
+    top = max(n for _, n in rows)
+    if not top:
+        print("Nothing recorded in the last 7 days. The status line records savings while it runs.")
+        return
+    print("Saved per day **estimated, recorded by the status line")
+    for d, n in rows:
+        print(f"  {d:%a %m-%d}  {'█' * round(n / top * 20):<20}  {'~' + fmt(n) if n else '-'}")
+    print(f"  {'total':<9}  {'':<20}  ~{fmt(sum(n for _, n in rows))}")
+
+
+def pet(now=None):
+    from statusline import PET_CRACK, PET_STAGES, PET_WIDTH, pet_rows
+    data = ledger()
+    total = data.get("total")
+    total = total if isinstance(total, (int, float)) else 0
+    stage = next((s for s in PET_STAGES if total >= s[0]), None)
+    born = data.get("born")
+    age = f", {int(((now or time.time()) - born) // 86400)} days old" if isinstance(born, (int, float)) else ""
+    ahead = [s[0] for s in PET_STAGES if total < s[0]]
+    nxt = f"next stage at {fmt(ahead[-1])} ({total / ahead[-1]:.0%})" if ahead else "fully grown"
+    for row, text in zip(pet_rows(stage, cracked=total >= PET_CRACK), (f"~{fmt(total)} tokens saved, lifetime{age}", nxt, "")):
+        print(f"{row:<{PET_WIDTH}}{text}".rstrip())
+
+
+def guard(event):
+    """PostToolUse hook: tell Claude a Bash output rides along on every later call. Silent under NOISY."""
+    resp = event.get("tool_response") if isinstance(event, dict) else None
+    if isinstance(resp, dict):
+        resp = "".join(str(resp.get(k) or "") for k in ("stdout", "stderr"))
+    try:
+        cap = int(os.environ.get("BASH_MAX_OUTPUT_LENGTH") or 30000)  # Claude Code's default cut, in chars
+    except ValueError:
+        cap = 30000
+    n = tokens(resp[:cap]) if isinstance(resp, str) else 0
+    if n < NOISY:
+        return
+    cmd = str((event.get("tool_input") or {}).get("command", ""))[:60]
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": (
+        f"claude-saver: `{cmd}` printed ~{fmt(n)} tokens, re-sent on every later call. "
+        "Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.")}}))
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -423,8 +481,17 @@ def main():
         audit(cwd)
     elif args[:1] == ["check"]:
         check(cwd)
+    elif args[:2] == ["savings", "--week"]:
+        week()
     elif args[:1] == ["savings"]:
         savings(args[1] if len(args) > 1 else newest_transcript(cwd), cwd)
+    elif args[:1] == ["pet"]:
+        pet()
+    elif args[:1] == ["guard"]:
+        try:
+            guard(json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
+        except ValueError:
+            pass
     else:
         sys.exit(__doc__)
 

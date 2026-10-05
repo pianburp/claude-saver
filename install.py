@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Install claude-saver into ~/.claude: status line, /token-audit and /savings.
+"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings and /pet.
 
   --with-plugins  also install the ponytail + caveman plugins (via the `claude` CLI when on PATH)
   --graphify      also install graphify (PyPI: graphifyy) and its skill
   --orchestrate   plan on Opus, execute on Sonnet (model: opusplan), subagents on Haiku
   --all           plugins + graphify (not --orchestrate: that changes your model)
+  --pet           a pet on the status line, fed by tokens saved
   --yes           apply settings.json changes without asking
   --dry-run       print what would change, write nothing
   --uninstall     remove what the installer added; your own settings stay
@@ -26,7 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RAW_URL = "https://raw.githubusercontent.com/pianburp/claude-saver/main/"
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
-FLAGS = {"--with-plugins", "--graphify", "--orchestrate", "--all", "--yes", "--dry-run", "--uninstall"}
+FLAGS = {"--with-plugins", "--graphify", "--orchestrate", "--pet", "--all", "--yes", "--dry-run", "--uninstall"}
 
 MARKETPLACES = {
     "ponytail": "DietrichGebert/ponytail",
@@ -50,10 +51,16 @@ Before editing a file, copy it to `<file>.bak`.
 If the caveman plugin is installed, offer `/caveman:caveman-compress` for files still over 500 tokens.""",
     ),
     "savings": (
-        "Show this session's token use and estimated savings from caveman, ponytail, graphify and the prompt cache.",
-        "Run `{run} savings` and print its output verbatim in a code block. Add nothing.",
+        "Show this session's token use and estimated savings from caveman, ponytail, graphify and the prompt cache. --week: per day.",
+        "Run `{run} savings $ARGUMENTS` and print its output verbatim in a code block. Add nothing.",
+    ),
+    "pet": (
+        "Show the status line pet: stage, age and lifetime tokens saved.",
+        "Run `{run} pet` and print its output verbatim in a code block. Add nothing.",
     ),
 }
+# saver.py subcommand each hook runs, and its matcher.
+HOOKS = {"SessionStart": ("startup", "check"), "PostToolUse": ("Bash", "guard")}
 
 
 def fetch(name, dest):
@@ -139,16 +146,16 @@ def with_plugins(args):
     return "--with-plugins" in args or "--all" in args
 
 
-def is_check(hook):
+def is_ours(hook, subs=tuple(" " + sub for _, sub in HOOKS.values())):
     cmd = hook.get("command", "")
-    return "saver.py" in cmd and cmd.endswith(" check")
+    return "saver.py" in cmd and cmd.endswith(subs)
 
 
 def apply_settings(settings, args, python, script):
     """Merge claude-saver's keys into settings.json; keep the user's own values."""
     settings["statusLine"] = {
         "type": "command",
-        "command": f'{python} "{script}"',
+        "command": f'{python} "{script}"' + (" --pet" if "--pet" in args else ""),
         "refreshInterval": 1,  # docs minimum; frames are 1s apart
     }
     env = settings.setdefault("env", {})
@@ -161,11 +168,12 @@ def apply_settings(settings, args, python, script):
     deny = settings.setdefault("permissions", {}).setdefault("deny", [])
     deny += [r for r in DENY_READS if r not in deny]
 
-    # New sessions only: after /compact or /resume the warning would just repeat.
-    check = f'{python} "{os.path.join(os.path.dirname(script), "saver.py")}" check'
-    starts = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
-    if not any(is_check(h) for group in starts for h in group.get("hooks", [])):
-        starts.append({"matcher": "startup", "hooks": [{"type": "command", "command": check}]})
+    # check on new sessions only: after /compact or /resume the warning would just repeat.
+    for event, (matcher, sub) in HOOKS.items():
+        cmd = f'{python} "{os.path.join(os.path.dirname(script), "saver.py")}" {sub}'
+        groups = settings.setdefault("hooks", {}).setdefault(event, [])
+        if not any(is_ours(h, " " + sub) for g in groups for h in g.get("hooks", [])):
+            groups.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
 
     if with_plugins(args):
         markets = settings.setdefault("extraKnownMarketplaces", {})
@@ -189,11 +197,14 @@ def remove_settings(settings):
     deny = (settings.get("permissions") or {}).get("deny")
     if deny:
         deny[:] = [r for r in deny if r not in DENY_READS]
-    starts = (settings.get("hooks") or {}).get("SessionStart")
-    if starts:
-        for group in starts:
-            group["hooks"] = [h for h in group.get("hooks", []) if not is_check(h)]
-        starts[:] = [g for g in starts if g["hooks"]]
+    hooks = settings.get("hooks") or {}
+    for event in HOOKS:
+        if event in hooks:
+            for group in hooks[event]:
+                group["hooks"] = [h for h in group.get("hooks", []) if not is_ours(h)]
+            hooks[event] = [g for g in hooks[event] if g["hooks"]]
+            if not hooks[event]:
+                del hooks[event]
     return settings
 
 
@@ -238,7 +249,7 @@ def uninstall():
             print(f"Removed {name}")
         except OSError:
             pass
-    for folder in (".statusline-ctx", os.path.join("skills", "token-audit"), os.path.join("skills", "savings")):
+    for folder in [".statusline-ctx"] + [os.path.join("skills", name) for name in SKILLS]:
         shutil.rmtree(os.path.join(CLAUDE_DIR, folder), ignore_errors=True)
     if os.path.exists(os.path.join(CLAUDE_DIR, "statusline.py.bak")):
         print("Your previous status line script is in statusline.py.bak. Point statusLine at it to keep using it.")
@@ -273,7 +284,7 @@ def main():
         print(f"Changes to {settings_path}:")
         print("\n".join("  " + line for line in diff))
     if "--dry-run" in args:
-        print(("Would remove" if "--uninstall" in args else "Would install") + f" statusline.py, saver.py, /token-audit and /savings in {CLAUDE_DIR}")
+        print(("Would remove" if "--uninstall" in args else "Would install") + f" statusline.py, saver.py, {', '.join('/' + s for s in SKILLS)} in {CLAUDE_DIR}")
         return
     if diff and "--yes" not in args and not confirm("Apply?"):
         sys.exit("Nothing changed.")

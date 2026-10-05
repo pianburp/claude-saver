@@ -121,6 +121,28 @@ assert "`model: haiku` to these agents: scout" in audit_out(cwd)
 out = audit_out(cwd)
 assert "Compact instructions" not in out and "BASH_MAX" not in out and "CACHING_1H" not in out, out
 
+# week and pet: read the status line's ledger
+from datetime import date
+os.makedirs(os.path.join(home, ".statusline-ctx"))
+json.dump({"total": 300000, "born": 0, "days": {"2026-10-05": 2000, "2026-10-01": 500, "2026-09-01": 9}},
+          open(os.path.join(home, ".statusline-ctx", "ledger.json"), "w"))
+def out_of(fn, *a):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*a)
+    return buf.getvalue()
+out = out_of(saver.week, date(2026, 10, 5))
+assert out.count("\n") == 9 and "█" * 20 + "  ~2.0k" in out and "█" * 5 + " " in out and "~2.5k" in out and "~9" not in out, out
+assert "Nothing recorded" in out_of(saver.week, date(2027, 1, 1))
+out = out_of(saver.pet, 3 * 86400)
+assert out == " ▐▛███▜▌✦  ~300.0k tokens saved, lifetime, 3 days old\n▝▜█████▛▘  next stage at 2.5M (12%)\n  ▘▘ ▝▝\n", out
+# guard: silent under NOISY, one hint naming the command over it
+os.environ.pop("BASH_MAX_OUTPUT_LENGTH")
+assert out_of(saver.guard, {"tool_input": {"command": "ls"}, "tool_response": {"stdout": "x" * 100}}) == ""
+hint = json.loads(out_of(saver.guard, {"tool_input": {"command": "npm test"}, "tool_response": {"stdout": "x" * 20000, "stderr": "y" * 20000}}))
+assert "`npm test` printed ~7.5k" in hint["hookSpecificOutput"]["additionalContext"], hint  # capped at 30000 chars
+assert out_of(saver.guard, {"tool_response": None}) == "" and out_of(saver.guard, []) == ""
+
 # install: env defaults kept, hook added once, opusplan only with --orchestrate
 import install
 st = {"env": {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70"}}
@@ -129,6 +151,8 @@ install.apply_settings(st, ["--orchestrate"], "py", "/c/statusline.py")
 assert st["env"] == {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70", "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"}, st
 assert st["model"] == "opusplan" and len(st["hooks"]["SessionStart"]) == 1, st
 assert st["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith('saver.py" check')
+(guard_hook,) = st["hooks"]["PostToolUse"]
+assert guard_hook["matcher"] == "Bash" and guard_hook["hooks"][0]["command"].endswith('saver.py" guard'), st
 assert "model" not in install.apply_settings({}, [], "py", "/c/statusline.py")
 st = {"permissions": {"deny": ["Read(**/node_modules/**)", "Bash(rm:*)"]}}
 install.apply_settings(st, [], "py", "/c/statusline.py")

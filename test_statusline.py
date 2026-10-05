@@ -86,10 +86,43 @@ with open(sp, "w") as f:
     f.write('{"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"' + "a" * 4000 + '"}]}}\n')
 assert "saved ~1.9k" in sl.render({"transcript_path": sp}), sl.render({"transcript_path": sp})
 assert "saved" not in sl.render({}) and "saved" not in sl.render({"transcript_path": tp})
-# effort abbreviated, unknown levels passed through; cache shown as a clock
+# ledger: each session's savings credited once (pet or not), to the lifetime total and today
+assert sl.PET_EGG[0][1] not in sl.render({"session_id": "p0", "transcript_path": sp})  # pet off by default
+egg = sl.render({"session_id": "p1", "transcript_path": sp}, now=os.path.getmtime(sp) + 60, pet=True).split("\n")  # ~3.8k lifetime: an egg
+assert [r[:sl.PET_WIDTH] for r in egg] == [r.ljust(sl.PET_WIDTH) for r in sl.PET_EGG[0]], egg
+assert egg[0][sl.PET_WIDTH] == "✻" and len(egg) == 3  # Clawd's rows get their own lines even with no line 2
+for i in range(2, 7):
+    sl.render({"session_id": f"p{i}", "transcript_path": sp}, pet=True)
+    sl.render({"session_id": f"p{i}", "transcript_path": sp}, pet=True)  # redraw: no double credit
+pet_file = os.path.join(sl.CLAUDE_DIR, ".statusline-ctx", "ledger.json")
+led, one = sl.load_state(pet_file), sl.load_state(os.path.join(sl.CLAUDE_DIR, ".statusline-ctx", "p1"))["saved_n"]
+assert led["total"] == 7 * one and list(led["days"].values()) == [7 * one] and led["born"], led
+mtime_sp = os.path.getmtime(sp)
+def pet(ctx, at):
+    """Clawd's (head, body, legs), stripped of the status line after it."""
+    data = {"session_id": "p1", "transcript_path": sp, "context_window": {"used_percentage": ctx}}
+    return tuple(r[:sl.PET_WIDTH].rstrip() for r in sl.render(data, now=mtime_sp + at, pet=True).split("\n"))
+assert pet(10, 60) == (" ▐▛███▜▌", "▝▜█████▛▘", "  ▘▘ ▝▝")  # 13.3k lifetime: hatched, idle
+assert pet(10, 3601) == (" ▐▀███▀▌ z", "▝▜█████▛▘", "  ▘▘ ▝▝")  # cache cold: asleep
+assert {pet(10, i)[1] for i in (0, 1)} == set(sl.PET_BODY)  # working: waves
+assert pet(10, 60 + sl.PET_BLINK - 1 - 60 % sl.PET_BLINK)[0] == " ▐▀███▀▌"  # blinks
+sl.NO_COLOR = False
+assert "38;5;%dm ▐▛███▜▌" % sl.RED in sl.render({"session_id": "p1", "transcript_path": sp, "context_window": {"used_percentage": 45}},
+                                                now=mtime_sp + 3000, pet=True)  # past the hatch glow; /compact range: red
+sl.NO_COLOR = True
+sl.save_state(pet_file, {"total": 3e6})
+assert pet(10, 60) == (" ▐▛███▜▌✦✦", "▝▜█████▛▘", "  ▘▘ ▝▝")
+# effort abbreviated, unknown levels passed through; cache time left always shown
 assert "xhi" in sl.render({"effort": "xhigh"}) and "xhigh" not in sl.render({"effort": "xhigh"})
 assert "max" in sl.render({"effort": "max"})
-assert sl.fmt_cache(60, frame=0).startswith(sl.CLOCK) and "cache" not in sl.fmt_cache(60, frame=0)
+assert sl.fmt_cache(60, frame=0) == "● 59m" and sl.fmt_cache(3600 - 30, frame=0) == "◔ 30s"
+assert [sl.fmt_cache(m * 60, frame=0)[0] for m in (20, 32, 48)] == list("◕◑◔")  # 40m, 28m, 12m left: drains
+assert sl.fmt_cache(3601, frame=0) == "○ cold" and sl.fmt_cache(None, frame=0) == ""
+line2 = sl.render({"transcript_path": sp, "rate_limits": {"seven_day": {"used_percentage": 40}}}, now=os.path.getmtime(sp) + 60).split("\n")[1]
+assert line2.startswith("⎿ 7d 40%") and line2.endswith("● 59m"), line2  # line 2, after 7d
+# resets: clock under 24h away, weekday after
+import time
+assert ":" in sl.fmt_reset(time.time() + 20 * 3600) and ":" not in sl.fmt_reset(time.time() + 2 * 86400)
 # bar: any nonzero usage shows at least one cell
-assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == 10
+assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == sl.BAR_WIDTH
 print("ok")

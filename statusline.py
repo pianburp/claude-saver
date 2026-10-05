@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Two-line status line styled after Claude Code's own UI.
 
-✻ model · effort · active modes (ponytail, caveman) · prompt cache
-  ⎿  context · 5h limit · 7d limit
+✻ model · effort · active modes (ponytail, caveman) · saved · prompt cache (last 5 minutes only)
+⎿ context · 5h limit · 7d limit
+
+Tokens saved are credited to ~/.claude/.statusline-ctx/ledger.json (lifetime and per day) for /pet and /savings --week.
+With --pet, Clawd (Claude Code's mascot, as on its welcome banner) stands left of the lines on three rows
+and earns a sparkle per stage of the lifetime total.
 
 Animates on the clock (one frame per second): ✻ spins while Claude works, rising values glow then fade,
 a low prompt cache breathes red. Per-session state lives in ~/.claude/.statusline-ctx/.
@@ -29,17 +33,27 @@ YELLOW = 179
 RED = 167
 
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-BAR_WIDTH = 10
+BAR_WIDTH = 6
 GLOW_SECS = 15
 ROLL_SECS = 3  # a rising number counts up from its old value over this long
 PEACH = 223  # glow start; fades smoothly into the segment's own color
 PULSE = (RED, 131, 95, 131)
 BUSY_SECS = 10
 CLEAR_PCT = 20  # cold cache past this much context: the next message re-bills it all, /clear is cheaper
+PIE = "○◔◑◕●"  # cache timer: drains as the cache runs down, empty once cold
 SPINNER = "·✢✳✶✻✽✻✶✳✢"  # forward then back, like Claude Code's own
 EFFORT = {"low": "lo", "medium": "med", "high": "hi", "xhigh": "xhi"}
-CLOCK = "◷ "  # prompt cache countdown
 SESSION_RE = r"[A-Za-z0-9_-]{1,128}"
+# Clawd as on Claude Code's welcome banner: head with {} {} eyes, body (arms down, arms up), legs.
+PET_HEAD = " ▐{}███{}▌"
+PET_BODY = ("▝▜█████▛▘", "▗▟█████▙▖")
+PET_LEGS = "  ▘▘ ▝▝"
+# (lifetime tokens saved, what Clawd wears beside its head). Below the lowest stage it's an egg (whole, then cracked).
+PET_STAGES = ((2_500_000, "✦✦"), (250_000, "✦"), (10_000, ""))
+PET_EGG = (("   ▄▄", "  ▟██▙", "  ▜██▛"), ("   ▄▄", "  ▟▚▞▙", "  ▜██▛"))
+PET_CRACK = 5_000  # the egg cracks halfway to hatching
+PET_BLINK = 7  # Clawd blinks once every this many seconds
+PET_WIDTH = 11  # columns Clawd takes left of the status line, gap included
 
 
 def paint(text, color, bold=False):
@@ -54,7 +68,7 @@ def label(text):
     return paint(text, GRAY)
 
 
-SEP = paint("  ·  ", DARK)
+SEP = paint(" · ", DARK)
 
 
 def level_color(pct):
@@ -147,16 +161,16 @@ def rose(state, key, value, now):
 
 
 def fmt_reset(epoch):
-    """'4:32p' when under 12h away, 'Fri 4:32p' otherwise."""
+    """'4:32p' when under 24h away, 'Fri' otherwise."""
     try:
         epoch = int(epoch)
         dt = datetime.fromtimestamp(epoch)
     except (TypeError, ValueError, OSError, OverflowError):
         return ""
     clock = f"{dt.hour % 12 or 12}:{dt:%M}{'a' if dt.hour < 12 else 'p'}"
-    if 0 <= epoch - time.time() < 12 * 3600:
+    if 0 <= epoch - time.time() < 24 * 3600:
         return clock
-    return f"{dt:%a} {clock}"
+    return f"{dt:%a}"
 
 
 def fmt_limit(name, window, state, now):
@@ -182,9 +196,11 @@ def fmt_saved(transcript_path, state, now):
     if state.get("saved_key") != key:
         # ponytail: full transcript parse per new message; parse only appended bytes if long sessions lag
         try:
-            state["saved_n"] = int(sum(r[1] for r in saver.saved_rows(saver.session_stats(transcript_path))))
+            stats = saver.session_stats(transcript_path)
+            state["saved_n"] = int(sum(r[1] for r in saver.saved_rows(stats)))
+            state["noisy_n"] = stats["noisy_count"]
         except Exception:
-            state["saved_n"] = 0
+            state["saved_n"] = state["noisy_n"] = 0
         state["saved_key"] = key
     n = state.get("saved_n") or 0
     if not n:
@@ -229,20 +245,72 @@ def cache_ttl(transcript_path=None):
 
 
 def fmt_cache(idle, frame, ttl=3600):
-    """Time left on the prompt cache, counted from the last transcript write.
+    """Time left on the prompt cache, counted from the last transcript write, behind a pie that drains with it.
 
-    Under 5 minutes it breathes through PULSE, one step per second.
+    Gray, then in its last 5 minutes it breathes through PULSE, one step per second.
     """
     if idle is None:
         return ""
     left = ttl - idle
     if left < 1:
-        return label(CLOCK) + paint("cold", RED)
+        return paint(PIE[0] + " cold", RED)
     m, s = divmod(int(left), 60)
-    text = f"{m}m" if m else f"{s}s"
-    if left <= 300:
-        return label(CLOCK) + paint(text, PULSE[frame % len(PULSE)])
-    return label(CLOCK) + paint(text, GREEN if left > ttl / 2 else YELLOW)
+    pie = PIE[min(4, max(1, math.ceil(left / ttl * 4)))]
+    return paint(f"{pie} {m}m" if m else f"{pie} {s}s", GRAY if left > 300 else PULSE[frame % len(PULSE)])
+
+
+def feed_ledger(state, now):
+    """Credit this session's new savings to ledger.json (lifetime and today); return the lifetime total."""
+    path = os.path.join(CLAUDE_DIR, ".statusline-ctx", "ledger.json")  # the dot keeps it apart from session ids
+    ledger = load_state(path)
+    total = ledger.get("total")
+    total = total if isinstance(total, (int, float)) else 0
+    n, fed = state.get("saved_n") or 0, state.get("ledger_fed") or 0
+    if n != fed:
+        state["ledger_fed"] = n
+        if n > fed:
+            # ponytail: read-modify-write, two sessions saving in the same instant can drop one gain; lock if it matters
+            days = ledger.get("days") if isinstance(ledger.get("days"), dict) else {}
+            day = time.strftime("%Y-%m-%d", time.localtime(now))
+            days[day] = (days.get(day) or 0) + n - fed
+            total += n - fed
+            save_state(path, {"total": total, "born": ledger.get("born") or now, "days": dict(sorted(days.items())[-60:])})
+    return total
+
+
+def pet_rows(stage, eyes="▛▜", wear=None, arms_up=False, cracked=False):
+    """Clawd's three rows for a PET_STAGES entry; the egg for None. wear replaces the stage's sparkle."""
+    if not stage:
+        return PET_EGG[cracked]
+    return PET_HEAD.format(*eyes) + (stage[1] if wear is None else wear), PET_BODY[arms_up], PET_LEGS
+
+
+def fmt_pet(state, lifetime, now, frame, idle, left, bloated):
+    """Clawd's three rows: eyes, arms and color from the session's signals; glows when it grows a stage."""
+    stage = next((s for s in PET_STAGES if lifetime >= s[0]), None)
+    hit = track(state, "pet_stage", stage[0] if stage else 0, now)
+    grew = hit[1] if hit else None
+    busy = idle is not None and idle < BUSY_SECS
+    if not stage:
+        rows = [(" " if busy and frame % 2 else "") + r for r in PET_EGG[lifetime >= PET_CRACK]]  # rocks while Claude works
+        return [paint(r.ljust(PET_WIDTH), glow(grew, CLAUDE)) for r in rows]
+    eyes, arms_up, wear, color = "▛▜", False, None, CLAUDE
+    noisy = state.get("noisy_n") or 0
+    sick = track(state, "noisy", noisy, now)
+    if sick and sick[0] < noisy:  # a 2k+ token tool output just landed
+        eyes, color = "▚▞", RED
+    elif idle is not None and left <= 0:
+        eyes, wear, color = "▀▀", " z", GRAY  # asleep
+    elif bloated:
+        color = RED
+    elif idle is not None and left <= 300:
+        color = PULSE[frame % len(PULSE)]
+    elif busy:
+        arms_up = frame % 2  # waves while Claude works
+    if eyes == "▛▜" and idle is not None and int(idle) % PET_BLINK == PET_BLINK - 1:
+        eyes = "▀▀"  # blink
+    rows = pet_rows(stage, eyes, wear, arms_up)
+    return [paint(r.ljust(PET_WIDTH), glow(grew, color)) for r in rows]
 
 
 def read_flag(path):
@@ -312,7 +380,7 @@ def read_effort(data, cwd, model_id):
     return ""
 
 
-def render(data, now=None):
+def render(data, now=None, pet=False):
     now = time.time() if now is None else now
     model = data.get("model") or {}
     cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
@@ -338,11 +406,13 @@ def render(data, now=None):
         paint(EFFORT.get(effort, effort), GRAY),
         fmt_modes(modes, hit[1] if hit else None),
         fmt_saved(data.get("transcript_path"), state, now),
-        fmt_cache(idle, frame, ttl),
     ]
 
     ctx = to_pct((data.get("context_window") or {}).get("used_percentage"))
     rate = data.get("rate_limits") or {}
+    left = ttl - idle if idle is not None else ttl
+    lifetime = feed_ledger(state, now) if path else 0
+    clawd = fmt_pet(state, lifetime, now, frame, idle, left, ctx is not None and ctx >= compact_pct() - 10) if pet else None
     ctx_part = ""
     if ctx is not None:
         cells = math.ceil(ctx / 100 * BAR_WIDTH)
@@ -352,7 +422,6 @@ def render(data, now=None):
         ctx_part = label("ctx ") + bar(ctx, glow_from, age) + " " + paint(f"{shown:.0f}%", level_color(ctx))
         # 10 points before auto-compact: compact by hand at a clean break instead of mid-task.
         # Also when the cache is about to expire: compacting while warm costs a fraction of re-billing it cold.
-        left = ttl - idle if idle is not None else ttl
         if left <= 0 and ctx >= CLEAR_PCT:
             ctx_part += " " + paint("/clear", YELLOW)
         elif ctx >= compact_pct() - 10 or (left <= min(300, ttl / 6) and idle >= BUSY_SECS and ctx >= CLEAR_PCT):
@@ -361,12 +430,16 @@ def render(data, now=None):
         ctx_part,
         fmt_limit("5h", rate.get("five_hour"), state, now),
         fmt_limit("7d", rate.get("seven_day"), state, now),
+        fmt_cache(idle, frame, ttl),
     ]
 
     if path:
         save_state(path, state)
     top, bottom = (SEP.join(p for p in line if p) for line in (line1, line2))
-    return top + ("\n" + paint("  ⎿  ", DARK) + bottom if bottom else "")
+    lines = [top] + ([paint("⎿ ", DARK) + bottom] if bottom else [])
+    if clawd:
+        lines = [row + (lines[i] if i < len(lines) else "") for i, row in enumerate(clawd)]
+    return "\n".join(lines)
 
 
 def main():
@@ -378,7 +451,7 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         data = {}
-    print(render(data if isinstance(data, dict) else {}))
+    print(render(data if isinstance(data, dict) else {}, pet="--pet" in sys.argv[1:]))
 
 
 if __name__ == "__main__":

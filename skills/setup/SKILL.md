@@ -1,7 +1,7 @@
 ---
 name: setup
-description: Install or update claude-saver's status line, auto-compact, deny rules, startup check, /token-audit and /savings in ~/.claude.
-argument-hint: "[--all] [--with-plugins] [--graphify] [--orchestrate] [--uninstall]"
+description: Install or update claude-saver's status line, auto-compact, deny rules, startup check, output guard, /token-audit, /savings and /pet in ~/.claude.
+argument-hint: "[--all] [--with-plugins] [--graphify] [--orchestrate] [--pet] [--uninstall]"
 disable-model-invocation: true
 ---
 

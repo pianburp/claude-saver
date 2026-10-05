@@ -39,14 +39,14 @@ def main():
 
     t0 = int(time.time())
     ctx, h5, d7 = 8, 20, 41
-    print("\n\n")
+    print("\n\n\n")
     for i in range(30):
         now = t0 + i
         if i in (3, 10):
             reply(12000)
             ctx, h5, d7 = ctx + 18, h5 + 22, d7 + 6
         if i < 16:
-            caption, written = "working: spinner turns, rising numbers count up and glow", now - (i % 3)
+            caption, written = "working: spinner turns, rising numbers count up and glow, the pet chews and hatches", now - (i % 3)
         elif i < 23:
             caption, written = "idle: cache under 5 minutes pulses red", now - 3600 + 240
         else:
@@ -61,8 +61,8 @@ def main():
             "rate_limits": {"five_hour": {"used_percentage": h5, "resets_at": t0 + 3 * 3600},
                             "seven_day": {"used_percentage": d7, "resets_at": t0 + 4 * 86400}},
         }
-        lines = sl.render(data, now=now).split("\n") + [sl.label("  " + caption)]
-        sys.stdout.write("\033[3A" + "".join("\r\033[K" + line + "\n" for line in lines))
+        lines = sl.render(data, now=now, pet=True).split("\n") + [sl.label("  " + caption)]
+        sys.stdout.write("\033[4A" + "".join("\r\033[K" + line + "\n" for line in lines))
         sys.stdout.flush()
         time.sleep(1 / FPS)
 
