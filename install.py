@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings and /pet.
+"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings, /pet and /wrapped.
 
   --with-plugins  also install the ponytail + caveman plugins (via the `claude` CLI when on PATH)
   --graphify      also install graphify (PyPI: graphifyy) and its skill
@@ -58,9 +58,14 @@ If the caveman plugin is installed, offer `/caveman:caveman-compress` for files 
         "Show the status line pet: stage, age and lifetime tokens saved.",
         "Run `{run} pet` and print its output verbatim in a code block. Add nothing.",
     ),
+    "wrapped": (
+        "Your Claude Code week as a Wrapped page: calls, top project, busiest day, peak hour, favourite tool, tokens saved.",
+        "Run `{run} wrapped` and print its output verbatim. Add nothing.",
+    ),
 }
 # saver.py subcommand each hook runs, and its matcher.
-HOOKS = {"SessionStart": ("startup", "check"), "PostToolUse": ("Bash", "guard")}
+HOOKS = {"SessionStart": ("startup", "check"), "PostToolUse": ("Bash", "guard"),
+         "PreToolUse": ("Bash|PowerShell|Read|Grep|Glob|Write|Edit|MultiEdit", "secrets")}
 
 
 def fetch(name, dest):

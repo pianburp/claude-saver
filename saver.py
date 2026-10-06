@@ -6,7 +6,9 @@
   saver.py savings [FILE]   this session's token use and estimated savings (default: newest transcript)
   saver.py savings --week   tokens saved per day over the last 7 days (recorded by the status line)
   saver.py pet              the status line pet: stage, age, lifetime tokens saved
+  saver.py wrapped          the last 7 days as a Wrapped-style HTML page, opened in the browser
   saver.py guard            tells Claude when a Bash output is 2k+ tokens (PostToolUse hook)
+  saver.py secrets          blocks .env access and writes that hardcode a key (PreToolUse hook)
 
 Token counts are chars/4, the same approximation graphify and most tools use.
 """
@@ -17,7 +19,10 @@ import os
 import re
 import sys
 import time
-from datetime import date, timedelta
+from collections import Counter
+from datetime import date, datetime, timedelta
+from html import escape
+from pathlib import Path
 
 from statusline import detect_ttl
 
@@ -313,7 +318,8 @@ def session_stats(path):
     """Usage deduped by message id (one transcript line per content block) plus content sizes."""
     s = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0,
          "text": 0, "code": 0, "caveman": False, "ponytail": False,
-         "reads": [], "graph_queries": [], "graph_results": 0, "noisy": [], "model_switches": 0}
+         "reads": [], "graph_queries": [], "graph_results": 0, "noisy": [], "model_switches": 0,
+         "cwd": None, "stamps": []}
     seen, tool_names, tool_labels, results, model = set(), {}, {}, {}, None
     files = [path] + glob.glob(os.path.join(os.path.splitext(path)[0], "subagents", "*.jsonl"))
     for f in files:
@@ -329,6 +335,8 @@ def session_stats(path):
             msg = entry.get("message") if isinstance(entry, dict) else None
             if not isinstance(msg, dict):
                 continue
+            if not s["cwd"] and isinstance(entry.get("cwd"), str):
+                s["cwd"] = entry["cwd"]
             usage = msg.get("usage")
             if msg.get("role") == "assistant" and isinstance(usage, dict) and msg.get("id") not in seen:
                 seen.add(msg.get("id"))
@@ -337,6 +345,10 @@ def session_stats(path):
                 s["cache_write"] += usage.get("cache_creation_input_tokens") or 0
                 s["cache_read"] += usage.get("cache_read_input_tokens") or 0
                 s["output"] += usage.get("output_tokens") or 0
+                try:  # local time of each call, for /wrapped
+                    s["stamps"].append(datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).astimezone())
+                except (KeyError, AttributeError, ValueError):
+                    pass
                 # Main thread only: subagents run other models on purpose. The cache is per model.
                 name = msg.get("model")
                 if f == path and name and not name.startswith("<"):
@@ -362,6 +374,7 @@ def session_stats(path):
                         s["graph_queries"].append(block.get("id"))
                 elif kind == "tool_result":
                     results[block.get("tool_use_id")] = tokens(result_text(block.get("content")))
+    s["tools"] = Counter(tool_names.values())
     s["reads"] = [n for i, n in results.items() if tool_names.get(i) == "Read"]
     s["graph_results"] = sum(results.get(i, 0) for i in s["graph_queries"])
     s["noisy_count"] = sum(n >= NOISY for n in results.values())
@@ -452,6 +465,101 @@ def pet(now=None):
         print(f"{row:<{PET_WIDTH}}{text}".rstrip())
 
 
+WRAPPED_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Claude Wrapped</title>
+<style>
+:root{color-scheme:dark;--bg:#14101f;--fg:#f4efe6;--dim:#a99fbd}
+*{box-sizing:border-box;margin:0}
+body{min-height:100vh;padding:48px 16px;color:var(--fg);font:16px/1.4 system-ui,sans-serif;
+ background:radial-gradient(circle at 15% 0,#3b1f5c,transparent 55%),radial-gradient(circle at 90% 100%,#5c2a1f,transparent 50%),var(--bg)}
+main{max-width:880px;margin:auto}
+header p{color:var(--dim);letter-spacing:.2em;text-transform:uppercase;font-size:13px}
+h1{font-size:clamp(44px,10vw,92px);line-height:.95;font-weight:800;margin:8px 0 32px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{border-radius:20px;padding:24px;background:var(--a);color:var(--bg);animation:pop .6s both}
+.wide{grid-column:1/-1}
+small{text-transform:uppercase;letter-spacing:.15em;font-size:12px;font-weight:700;opacity:.7}
+.card b{display:block;font-size:clamp(28px,5vw,44px);line-height:1.05;margin:10px 0 6px;overflow-wrap:anywhere}
+.card span{font-size:14px;opacity:.8;overflow-wrap:anywhere}
+.chart{display:flex;align-items:end;gap:10px;height:140px;margin:16px 0 22px}
+.chart div{flex:1;min-height:4px;border-radius:6px 6px 0 0;background:var(--bg);position:relative}
+.chart i{position:absolute;bottom:-22px;left:0;right:0;text-align:center;font:600 12px system-ui}
+pre{font:22px/1.05 ui-monospace,Consolas,monospace;color:#d97757;margin:12px 0}
+@keyframes pop{from{opacity:0;transform:translateY(16px) scale(.97)}}
+@media (prefers-reduced-motion:reduce){.card{animation:none}}
+</style>
+<main><header><p>$range</p><h1>Your week<br>with Claude</h1></header><div class="grid">$cards</div></main>
+"""
+WRAPPED_COLORS = ("#f7c948", "#7ee0b3", "#ff8fa3", "#8ab4ff", "#c9a7ff", "#ffb27a", "#b8f27c", "#f4efe6")
+
+
+def wrapped(today=None, show=True):
+    """The last 7 days across every project as a Wrapped-style HTML page."""
+    from string import Template
+    from statusline import PET_CRACK, PET_STAGES, pet_rows
+    today = today or date.today()
+    start = today - timedelta(6)
+    cutoff = time.mktime(start.timetuple())
+    stats = [session_stats(p) for p in glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", "*.jsonl"))
+             if os.path.getmtime(p) >= cutoff]
+    for s in stats:
+        s["stamps"] = [t for t in s["stamps"] if start <= t.date() <= today]
+    stats = [s for s in stats if s["stamps"]]
+    if not stats:
+        print("No Claude Code activity in the last 7 days.")
+        return
+    stamps = [t for s in stats for t in s["stamps"]]
+    projects = Counter()
+    for s in stats:
+        projects[os.path.basename((s["cwd"] or "?").rstrip("/\\")) or s["cwd"]] += len(s["stamps"])
+    by_day, hours = Counter(t.date() for t in stamps), Counter(t.hour for t in stamps)
+    tools = sum((s["tools"] for s in stats), Counter()).most_common(3)
+    (busiest, busiest_n), peak = by_day.most_common(1)[0], hours.most_common(1)[0][0]
+    loud = max((n for s in stats for n in s["noisy"]), default=None)
+    data = ledger()
+    saved = sum((data.get("days") or {}).get((start + timedelta(i)).isoformat()) or 0 for i in range(7))
+    total = data.get("total") if isinstance(data.get("total"), (int, float)) else 0
+    top_project, top_n = projects.most_common(1)[0]
+
+    # (kicker, big, sub); ponytail: tokens are whole sessions, a session that began before the week counts in full
+    cards = [
+        ("You and Claude", f"{len(stamps):,}", f"API calls across {len(stats)} sessions"),
+        ("Top project", top_project, f"{top_n:,} calls · {len(projects)} projects this week"),
+        ("Busiest day", f"{busiest:%A}", f"{busiest_n:,} calls on {busiest:%b %d}"),
+        ("Your type", "Night owl" if peak >= 22 or peak < 5 else "Early bird" if peak < 9 else "Daylight builder",
+         f"Most calls at {peak:02d}:00"),
+    ]
+    if tools:
+        cards.append(("Favourite tool", tools[0][0], f"{tools[0][1]:,} uses" + "".join(f" · then {t}" for t, _ in tools[1:])))
+    cards.append(("Claude wrote", f"{fmt(sum(s['output'] for s in stats))} tokens",
+                  f"and re-read {fmt(sum(s['cache_read'] for s in stats))} from cache at a tenth of the price"))
+    if saved:
+        cards.append(("Saved", f"~{fmt(saved)}", "tokens, estimated from caveman, ponytail and graphify"))
+    if loud:
+        cards.append(("Loudest command", f"{fmt(loud[0])} tokens", loud[1]))
+
+    html = [f'<div class="card" style="--a:{WRAPPED_COLORS[i % len(WRAPPED_COLORS)]};animation-delay:{i * .08:.2f}s">'
+            f"<small>{escape(k)}</small><b>{escape(big)}</b><span>{escape(sub)}</span></div>"
+            for i, (k, big, sub) in enumerate(cards)]
+    top = max(by_day.values())
+    bars = "".join(f'<div style="height:{by_day[d] / top * 100:.0f}%" title="{by_day[d]} calls"><i>{d:%a}</i></div>'
+                   for d in (start + timedelta(i) for i in range(7)))
+    html.append(f'<div class="card wide" style="--a:#e8ddff"><small>Calls per day</small><div class="chart">{bars}</div></div>')
+    stage = next((st for st in PET_STAGES if total >= st[0]), None)
+    art = escape("\n".join(pet_rows(stage, cracked=total >= PET_CRACK)))
+    html.append(f'<div class="card wide" style="--a:#1f1830;color:var(--fg)"><small>Your pet</small>'
+                f"<pre>{art}</pre><span>~{fmt(total)} tokens saved, lifetime</span></div>")
+
+    out = os.path.normpath(os.path.join(CLAUDE_DIR, ".statusline-ctx", "wrapped.html"))
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(Template(WRAPPED_PAGE).substitute(range=f"{start:%b %d} – {today:%b %d, %Y}", cards="\n".join(html)))
+    print(f"{len(stamps):,} calls, top project {top_project}, busiest {busiest:%A}. Wrapped: {out}")
+    if show:
+        import webbrowser
+        webbrowser.open(Path(out).as_uri())
+
+
 def guard(event):
     """PostToolUse hook: tell Claude a Bash output rides along on every later call. Silent under NOISY."""
     resp = event.get("tool_response") if isinstance(event, dict) else None
@@ -468,6 +576,50 @@ def guard(event):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": (
         f"claude-saver: `{cmd}` printed ~{fmt(n)} tokens, re-sent on every later call. "
         "Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.")}}))
+
+
+# .env, .env.local, .env.production.local at a path/word boundary; not .environment.
+ENV_FILE = re.compile(r"""(?:^|[\s'"`=:/\\(,|])(\.env(?:\.[\w-]+)*)(?![\w-])""")
+PLACEHOLDER = re.compile(r"\.(example|sample|template|dist)$", re.I)  # placeholder values, normally committed
+# ponytail: well-known prefixes only, no entropy scan. Add a pattern when a new key type leaks.
+SECRETS = {name: re.compile(p) for name, p in {
+    "Anthropic or OpenAI key": r"\bsk-(?:ant-|proj-)?[\w-]{20,}",
+    "Stripe live key": r"\b[rs]k_live_[0-9A-Za-z]{20,}",
+    "AWS access key": r"\bAKIA[0-9A-Z]{16}\b",
+    "GitHub token": r"\b(?:gh[pousr]_[0-9A-Za-z]{36}|github_pat_\w{22,})",
+    "Google API key": r"\bAIza[\w-]{35}",
+    "Slack token": r"\bxox[abprs]-[0-9A-Za-z-]{10,}",
+    "private key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+}.items()}
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
+
+
+def secrets(event):
+    """PreToolUse hook: deny touching .env files, and writes that hardcode a credential."""
+    ti = event.get("tool_input") if isinstance(event, dict) else None
+    if not isinstance(ti, dict):
+        return
+    reason = None
+    if event.get("tool_name") in WRITE_TOOLS:
+        # A key in .env is where it belongs. Bash heredocs are not scanned.
+        if os.path.basename(str(ti.get("file_path") or "")).startswith(".env"):
+            return
+        edits = [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
+        text = "\n".join(str(v) for v in [ti.get("content"), ti.get("new_string")] + edits if v)
+        kind = next((k for k, p in SECRETS.items() if p.search(text)), None)
+        if kind:
+            reason = (f"Blocked: this write hardcodes a {kind}. Anyone with the repo or its history can use it. "
+                      "Read it from an environment variable and keep the value in .env (gitignored).")
+    else:
+        hay = "\n".join(v for v in (ti.get(k) for k in ("file_path", "path", "pattern", "command", "glob")) if isinstance(v, str))
+        hit = next((m.group(1) for m in ENV_FILE.finditer(hay) if not PLACEHOLDER.search(m.group(1))), None)
+        if hit:
+            reason = (f'Blocked: "{hit}" holds live secrets. Printing one into the transcript cannot be undone: '
+                      "the user has to rotate the credential. Read the code default, .env.example or README.md instead. "
+                      "To check a variable is set, print a boolean, never the value. Do not trust a redaction pattern.")
+    if reason:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
 
 
 def main():
@@ -487,9 +639,11 @@ def main():
         savings(args[1] if len(args) > 1 else newest_transcript(cwd), cwd)
     elif args[:1] == ["pet"]:
         pet()
-    elif args[:1] == ["guard"]:
+    elif args[:1] == ["wrapped"]:
+        wrapped()
+    elif args[:1] in (["guard"], ["secrets"]):
         try:
-            guard(json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
+            {"guard": guard, "secrets": secrets}[args[0]](json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
         except ValueError:
             pass
     else:

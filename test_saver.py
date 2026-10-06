@@ -136,12 +136,35 @@ assert out.count("\n") == 9 and "█" * 20 + "  ~2.0k" in out and "█" * 5 + " 
 assert "Nothing recorded" in out_of(saver.week, date(2027, 1, 1))
 out = out_of(saver.pet, 3 * 86400)
 assert out == " ▐▛███▜▌✦  ~300.0k tokens saved, lifetime, 3 days old\n▝▜█████▛▘  next stage at 2.5M (12%)\n  ▘▘ ▝▝\n", out
+# wrapped: cards from the week's transcripts, values escaped, out-of-week calls dropped
+os.makedirs(os.path.join(home, "projects", "p"))
+wk = [{"cwd": "/w/<b>", "timestamp": f"2026-10-0{d}T12:00:00Z", "message": {"id": f"w{i}", "role": "assistant", "usage": {},
+       "content": [{"type": "tool_use", "id": f"u{i}", "name": "Grep", "input": {}}]}} for i, d in enumerate((5, 5, 3))]
+wk.append(dict(wk[0], timestamp="2026-09-01T12:00:00Z", message=dict(wk[0]["message"], id="old")))
+open(os.path.join(home, "projects", "p", "w.jsonl"), "w").write("\n".join(json.dumps(x) for x in wk))
+assert out_of(saver.wrapped, date(2026, 10, 5), False).startswith("3 calls, top project <b>, busiest Monday")
+page = open(os.path.join(home, ".statusline-ctx", "wrapped.html"), encoding="utf-8").read()
+assert "&lt;b&gt;" in page and "<b>Grep</b>" in page and "~2.5k" in page and "$" not in page, page
+assert "No Claude Code activity" in out_of(saver.wrapped, date(2027, 1, 1), False)
 # guard: silent under NOISY, one hint naming the command over it
 os.environ.pop("BASH_MAX_OUTPUT_LENGTH")
 assert out_of(saver.guard, {"tool_input": {"command": "ls"}, "tool_response": {"stdout": "x" * 100}}) == ""
 hint = json.loads(out_of(saver.guard, {"tool_input": {"command": "npm test"}, "tool_response": {"stdout": "x" * 20000, "stderr": "y" * 20000}}))
 assert "`npm test` printed ~7.5k" in hint["hookSpecificOutput"]["additionalContext"], hint  # capped at 30000 chars
 assert out_of(saver.guard, {"tool_response": None}) == "" and out_of(saver.guard, []) == ""
+# secrets: .env reads denied, placeholders and .environment allowed; keys built by concatenation so this file stays writable
+def denied(tool, **ti):
+    out = out_of(saver.secrets, {"tool_name": tool, "tool_input": ti})
+    return out and json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+env = "." + "env"
+assert '"' + env + '.local"' in denied("Bash", command=f"grep -i gemini {env}.local | sed s/KEY/x/")
+assert denied("Read", file_path=f"C:\\app\\{env}") and denied("Grep", pattern=f"node_modules|\\{env}")
+assert not denied("Read", file_path=f"/app/{env}.example") and not denied("Bash", command="cat .environment.ts")
+aws = "AKIA" + "Q" * 16
+assert "AWS access key" in denied("Write", file_path="/app/config.ts", content=f"const k = '{aws}'")
+assert "private key" in denied("MultiEdit", file_path="/app/k.py", edits=[{"new_string": "-----BEGIN RSA PRIVATE" + " KEY-----"}])
+assert not denied("Edit", file_path=f"/app/{env}.local", new_string=f"AWS={aws}") and not denied("Write", file_path="/a.ts", content="sk-short")
+assert out_of(saver.secrets, []) == "" and out_of(saver.secrets, {"tool_input": None}) == ""
 
 # install: env defaults kept, hook added once, opusplan only with --orchestrate
 import install
@@ -153,6 +176,8 @@ assert st["model"] == "opusplan" and len(st["hooks"]["SessionStart"]) == 1, st
 assert st["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith('saver.py" check')
 (guard_hook,) = st["hooks"]["PostToolUse"]
 assert guard_hook["matcher"] == "Bash" and guard_hook["hooks"][0]["command"].endswith('saver.py" guard'), st
+(secrets_hook,) = st["hooks"]["PreToolUse"]
+assert "Write" in secrets_hook["matcher"] and secrets_hook["hooks"][0]["command"].endswith('saver.py" secrets'), st
 assert "model" not in install.apply_settings({}, [], "py", "/c/statusline.py")
 st = {"permissions": {"deny": ["Read(**/node_modules/**)", "Bash(rm:*)"]}}
 install.apply_settings(st, [], "py", "/c/statusline.py")

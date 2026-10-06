@@ -44,8 +44,10 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [Deny rules](#deny-rules) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `.env`, `.env.local`, `.env.*.local` | Automatic |
 | [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Automatic |
 | [Output guard](#output-guard) | Tells Claude when a Bash output is 2k+ tokens, so it uses quiet flags next time | Automatic |
+| [Secret guard](#secret-guard) | Blocks reading `.env` files and writing hardcoded API keys | Automatic |
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
 | [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | On demand |
+| [`/wrapped`](#wrapped) | Your week with Claude as a Wrapped-style page | On demand |
 | [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | Opt-in |
 | [`--pet`](#pet) | A status line pet that eats the tokens you save | Opt-in |
 | [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
@@ -144,6 +146,15 @@ claude-saver: `npm test` printed ~7.5k tokens, re-sent on every later call. Next
 
 The count stops at `BASH_MAX_OUTPUT_LENGTH` (30000 chars by default), the most Claude sees. Smaller outputs print nothing.
 
+### Secret guard
+
+A `PreToolUse` hook runs `saver.py secrets`. It denies two things:
+
+- **Touching `.env` files** from Bash, PowerShell, Read, Grep or Glob (`.env`, `.env.local`, `.env.production.local`). A secret printed into the transcript can't be taken back. Deny rules on `Read()` alone miss `grep KEY .env` in a shell. `.env.example`, `.sample`, `.template` and `.dist` stay readable.
+- **Writes that hardcode a key**: a Write, Edit or MultiEdit containing an Anthropic, OpenAI, Stripe live, AWS, GitHub, Google or Slack key, or a private key block. Writes to `.env*` files are allowed, since that's where keys belong.
+
+It matches known key prefixes only, with no entropy scan. Bash heredocs are not scanned.
+
 ## On demand
 
 ### /token-audit
@@ -198,6 +209,12 @@ Saved per day **estimated, recorded by the status line
 ```
 
 Only sessions with the status line running count.
+
+### /wrapped
+
+Your last 7 days across every project, as a Spotify Wrapped-style page that opens in your browser.
+The cards show API calls, top project, busiest day, peak hour, favourite tool, tokens written, tokens saved, the loudest command, calls per day and your pet.
+It reads the session transcripts and the ledger, and writes `~/.claude/.statusline-ctx/wrapped.html`. Nothing leaves your machine.
 
 ## --orchestrate
 
@@ -258,7 +275,7 @@ What the installer touches:
 3. Writes the `/token-audit` and `/savings` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
    They cost no tokens until you type them.
 4. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
-5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules, the startup hook and the output guard hook.
+5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules, the startup hook, the output guard hook and the secret guard hook.
    It keeps your values for everything except `statusLine` (and `model` with `--orchestrate`).
 
 **Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/ctx-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
@@ -266,8 +283,8 @@ What the installer touches:
 **Uninstall:** `/ctx-saver:setup --uninstall`, then `/plugin uninstall ctx-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
 
 - It shows the `settings.json` changes and asks first, like the install does.
-- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the three skills from `~/.claude/`.
-- From `settings.json` it removes `statusLine`, both hooks and the deny rules.
+- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the four skills from `~/.claude/`.
+- From `settings.json` it removes `statusLine`, the three hooks and the deny rules.
   It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold the installer's values. Values you set yourself stay.
 - The plugins stay. Remove them via `/plugin`, and graphify with `graphify uninstall`.
 
@@ -298,7 +315,7 @@ What the installer touches:
 | `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/ctx-saver:setup`, which runs `install.py` from the plugin folder. |
 | `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
-| `saver.py` | `audit`, `check`, `savings`, `pet` and `guard`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Never writes. |
+| `saver.py` | `audit`, `check`, `savings`, `pet`, `wrapped`, `guard` and `secrets`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Never writes. |
 | `test_*.py` | Plain `assert` tests, no framework. |
 | `demo.py` | Plays the status line animations with fake data in a temp dir. Not installed. |
 | `.github/workflows/upstream.yml` | Weekly job that fails if caveman, ponytail or graphify rename a flag file or marker that claude-saver reads. |
