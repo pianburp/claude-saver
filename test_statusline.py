@@ -125,4 +125,14 @@ import time
 assert ":" in sl.fmt_reset(time.time() + 20 * 3600) and ":" not in sl.fmt_reset(time.time() + 2 * 86400)
 # bar: any nonzero usage shows at least one cell
 assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == sl.BAR_WIDTH
+# /toggle pet: config.json overrides the --pet the installer baked in
+import subprocess, sys
+cfg_home = tempfile.mkdtemp()
+os.makedirs(os.path.join(cfg_home, ".statusline-ctx"))
+draw = lambda *a: subprocess.run([sys.executable, "statusline.py", *a], input="{}", capture_output=True, text=True,
+                                 encoding="utf-8", env=dict(os.environ, CLAUDE_CONFIG_DIR=cfg_home)).stdout
+assert sl.PET_EGG[0][1] in draw("--pet")
+with open(os.path.join(cfg_home, ".statusline-ctx", "config.json"), "w") as f:
+    f.write('{"pet": false}')
+assert sl.PET_EGG[0][1] not in draw("--pet")
 print("ok")

@@ -179,6 +179,9 @@ assert guard_hook["matcher"] == "Bash" and guard_hook["hooks"][0]["command"].end
 (secrets_hook,) = st["hooks"]["PreToolUse"]
 assert "Write" in secrets_hook["matcher"] and secrets_hook["hooks"][0]["command"].endswith('saver.py" secrets'), st
 assert "model" not in install.apply_settings({}, [], "py", "/c/statusline.py")
+# install: rerun with a new Python repoints existing hooks instead of keeping the old path
+install.apply_settings(st, [], '"C:/new/python.exe"', "/c/statusline.py")
+assert len(st["hooks"]["SessionStart"]) == 1 and st["hooks"]["SessionStart"][0]["hooks"][0]["command"].startswith('"C:/new/python.exe"'), st
 st = {"permissions": {"deny": ["Read(**/node_modules/**)", "Bash(rm:*)"]}}
 install.apply_settings(st, [], "py", "/c/statusline.py")
 assert st["permissions"]["deny"][:2] == ["Read(**/node_modules/**)", "Bash(rm:*)"] and len(st["permissions"]["deny"]) == len(install.DENY_READS) + 1
@@ -203,4 +206,21 @@ assert install.conflicts({}, os.path.join(home, "nope")) == []
 # graphify: pip --user's scripts dir is searched, not only ~/.local/bin (wrong on Windows)
 import site
 assert any(d.startswith(site.getuserbase()) for d in install.graphify_dirs()), install.graphify_dirs()
+# toggle: config.json beats the installer's --pet; a switched-off hook prints nothing
+import contextlib, io, subprocess, sys
+with open(os.path.join(home, "settings.json"), "w") as f:
+    json.dump({"statusLine": {"command": 'py "statusline.py" --pet'}}, f)
+assert saver.is_on("pet") and saver.is_on("guard")
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    saver.toggle(["pet"])
+    saver.toggle(["guard", "off"])
+assert not saver.is_on("pet") and not saver.is_on("guard") and saver.is_on("secrets"), out.getvalue()
+assert "guard    off" in out.getvalue()
+big = json.dumps({"tool_input": {"command": "x"}, "tool_response": {"stdout": "y" * 20000}})
+run = lambda: subprocess.run([sys.executable, "saver.py", "guard"], input=big, capture_output=True, text=True,
+                             env=dict(os.environ, CLAUDE_CONFIG_DIR=home)).stdout
+assert run() == ""
+with contextlib.redirect_stdout(io.StringIO()):
+    saver.toggle(["guard", "on"])
+assert "printed ~5.0k tokens" in run()
 print("ok")

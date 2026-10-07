@@ -9,6 +9,7 @@
   saver.py wrapped          the last 7 days as a Wrapped-style HTML page, opened in the browser
   saver.py guard            tells Claude when a Bash output is 2k+ tokens (PostToolUse hook)
   saver.py secrets          blocks .env access and writes that hardcode a key (PreToolUse hook)
+  saver.py toggle [NAME [on|off]]  turn pet, check, guard or secrets on/off mid-session; no args lists them
 
 Token counts are chars/4, the same approximation graphify and most tools use.
 """
@@ -622,6 +623,51 @@ def secrets(event):
             "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
 
 
+# ---------- toggle ----------
+
+SWITCHES = {
+    "pet": "Clawd on the status line",
+    "check": "startup check (SessionStart hook)",
+    "guard": "big-output guard (PostToolUse hook)",
+    "secrets": "secret guard: blocks .env reads and hardcoded keys (PreToolUse hook)",
+}
+
+
+def config_path():
+    return os.path.join(CLAUDE_DIR, ".statusline-ctx", "config.json")
+
+
+def is_on(name):
+    """config.json wins; else the pet follows the installer's --pet and the hooks are on."""
+    cfg = load_json(config_path())
+    value = cfg.get(name) if isinstance(cfg, dict) else None
+    if isinstance(value, bool):
+        return value
+    if name == "pet":
+        cmd = (load_json(os.path.join(CLAUDE_DIR, "settings.json")).get("statusLine") or {}).get("command", "")
+        return cmd.endswith(" --pet")
+    return True
+
+
+def toggle(args):
+    """toggle [NAME [on|off]]: flip or set a switch, then list them all. No restart needed."""
+    if args:
+        name, value = args[0].lower(), (args[1].lower() if len(args) > 1 else None)
+        if name not in SWITCHES or value not in (None, "on", "off"):
+            sys.exit(f"Usage: toggle [{'|'.join(SWITCHES)} [on|off]]")
+        cfg = load_json(config_path())
+        cfg = cfg if isinstance(cfg, dict) else {}
+        cfg[name] = not is_on(name) if value is None else value == "on"
+        os.makedirs(os.path.dirname(config_path()), exist_ok=True)
+        with open(config_path(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    print("Switches (take effect now, no restart):")
+    for name, what in SWITCHES.items():
+        print(f"  {name:<8} {'on ' if is_on(name) else 'off'}  {what}")
+    print("caveman / ponytail: `stop caveman`, `stop ponytail` for this session; "
+          "/plugin to disable them for every session.")
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -629,8 +675,12 @@ def main():
         pass
     args = sys.argv[1:]
     cwd = os.getcwd()
+    if args[:1] in (["check"], ["guard"], ["secrets"]) and not is_on(args[0]):
+        return  # switched off with /toggle
     if args[:1] == ["audit"]:
         audit(cwd)
+    elif args[:1] == ["toggle"]:
+        toggle(args[1:])
     elif args[:1] == ["check"]:
         check(cwd)
     elif args[:2] == ["savings", "--week"]:

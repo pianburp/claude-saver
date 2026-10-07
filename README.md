@@ -48,6 +48,7 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
 | [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | On demand |
 | [`/wrapped`](#wrapped) | Your week with Claude as a Wrapped-style page | On demand |
+| [`/toggle`](#toggle) | Turns the pet and the three hooks on or off mid-session | On demand |
 | [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | Opt-in |
 | [`--pet`](#pet) | A status line pet that eats the tokens you save | Opt-in |
 | [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
@@ -85,7 +86,7 @@ Only plain Unicode glyphs (`✻ ⎿ █ ░ · ●`) are used. No Nerd Font need
 It eats the `saved` count from every session.
 It costs no tokens: the status line is never sent to the model.
 The status line credits each session's savings to `~/.claude/.statusline-ctx/ledger.json`, pet or not.
-`/pet` shows its stage, age, lifetime savings and progress to the next stage.
+`/toggle pet` shows or hides it mid-session. `/pet` shows its stage, age, lifetime savings and progress to the next stage.
 
 ![Clawd's stages: an egg under 5k, cracked at 5k, hatched at 10k, one sparkle at 250k, two at 2.5M](pet.svg)
 
@@ -216,6 +217,29 @@ Your last 7 days across every project, as a Spotify Wrapped-style page that open
 The cards show API calls, top project, busiest day, peak hour, favourite tool, tokens written, tokens saved, the loudest command, calls per day and your pet.
 It reads the session transcripts and the ledger, and writes `~/.claude/.statusline-ctx/wrapped.html`. Nothing leaves your machine.
 
+### /toggle
+
+Turns a feature on or off without editing `settings.json` or restarting:
+
+```
+/toggle                 list switches
+/toggle pet             flip one
+/toggle secrets off     set one
+```
+
+```
+Switches (take effect now, no restart):
+  pet      on   Clawd on the status line
+  check    on   startup check (SessionStart hook)
+  guard    off  big-output guard (PostToolUse hook)
+  secrets  on   secret guard: blocks .env reads and hardcoded keys (PreToolUse hook)
+```
+
+Switches live in `~/.claude/.statusline-ctx/config.json` and persist across sessions.
+The status line and the hooks read it on every run, so a change applies on the next redraw or tool call.
+A switch you set beats the installer's `--pet`.
+caveman and ponytail have their own: `stop caveman` / `stop ponytail` for the session, `/plugin` to disable them everywhere.
+
 ## --orchestrate
 
 Sets `"model": "opusplan"`: Opus in plan mode (Shift+Tab twice), Sonnet once you execute.
@@ -272,7 +296,7 @@ What the installer touches:
 1. Lists every `settings.json` change and asks `Apply? [Y/n]`. Answering no leaves every file as it was.
    With no terminal to ask (output redirected), it applies them.
 2. Copies `statusline.py` and `saver.py` to `~/.claude/`.
-3. Writes the `/token-audit` and `/savings` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
+3. Writes the `/token-audit`, `/savings`, `/pet`, `/wrapped` and `/toggle` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
    They cost no tokens until you type them.
 4. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
 5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules, the startup hook, the output guard hook and the secret guard hook.
@@ -283,7 +307,7 @@ What the installer touches:
 **Uninstall:** `/ctx-saver:setup --uninstall`, then `/plugin uninstall ctx-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
 
 - It shows the `settings.json` changes and asks first, like the install does.
-- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the four skills from `~/.claude/`.
+- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the five skills from `~/.claude/`.
 - From `settings.json` it removes `statusLine`, the three hooks and the deny rules.
   It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold the installer's values. Values you set yourself stay.
 - The plugins stay. Remove them via `/plugin`, and graphify with `graphify uninstall`.
@@ -315,7 +339,7 @@ What the installer touches:
 | `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/ctx-saver:setup`, which runs `install.py` from the plugin folder. |
 | `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
 | `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
-| `saver.py` | `audit`, `check`, `savings`, `pet`, `wrapped`, `guard` and `secrets`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Never writes. |
+| `saver.py` | `audit`, `check`, `savings`, `pet`, `wrapped`, `guard`, `secrets` and `toggle`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Writes only `wrapped.html` and the `/toggle` switches. |
 | `test_*.py` | Plain `assert` tests, no framework. |
 | `demo.py` | Plays the status line animations with fake data in a temp dir. Not installed. |
 | `.github/workflows/upstream.yml` | Weekly job that fails if caveman, ponytail or graphify rename a flag file or marker that claude-saver reads. |

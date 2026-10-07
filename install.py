@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings, /pet and /wrapped.
+"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings, /pet, /wrapped and /toggle.
 
   --with-plugins  also install the ponytail + caveman plugins (via the `claude` CLI when on PATH)
   --graphify      also install graphify (PyPI: graphifyy) and its skill
@@ -57,6 +57,10 @@ If the caveman plugin is installed, offer `/caveman:caveman-compress` for files 
     "pet": (
         "Show the status line pet: stage, age and lifetime tokens saved.",
         "Run `{run} pet` and print its output verbatim in a code block. Add nothing.",
+    ),
+    "toggle": (
+        "Turn the pet, startup check, output guard or secret guard on or off mid-session. No args: list them.",
+        "Run `{run} toggle $ARGUMENTS` and print its output verbatim in a code block. Add nothing.",
     ),
     "wrapped": (
         "Your Claude Code week as a Wrapped page: calls, top project, busiest day, peak hour, favourite tool, tokens saved.",
@@ -177,7 +181,10 @@ def apply_settings(settings, args, python, script):
     for event, (matcher, sub) in HOOKS.items():
         cmd = f'{python} "{os.path.join(os.path.dirname(script), "saver.py")}" {sub}'
         groups = settings.setdefault("hooks", {}).setdefault(event, [])
-        if not any(is_ours(h, " " + sub) for g in groups for h in g.get("hooks", [])):
+        ours = [h for g in groups for h in g.get("hooks", []) if is_ours(h, " " + sub)]
+        for h in ours:  # rerun repoints hooks at the current Python, e.g. after the old one was uninstalled
+            h["command"] = cmd
+        if not ours:
             groups.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
 
     if with_plugins(args):

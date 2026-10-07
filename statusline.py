@@ -5,7 +5,7 @@
 ⎿ context · 5h limit · 7d limit
 
 Tokens saved are credited to ~/.claude/.statusline-ctx/ledger.json (lifetime and per day) for /pet and /savings --week.
-With --pet, Clawd (Claude Code's mascot, as on its welcome banner) stands left of the lines on three rows
+With --pet (or /toggle pet on), Clawd (Claude Code's mascot, as on its welcome banner) stands left of the lines on three rows
 and earns a sparkle per stage of the lifetime total.
 
 Animates on the clock (one frame per second): ✻ spins while Claude works, rising values glow then fade,
@@ -451,7 +451,9 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         data = {}
-    print(render(data if isinstance(data, dict) else {}, pet="--pet" in sys.argv[1:]))
+    # /toggle pet writes config.json; it beats the --pet the installer baked in, and takes effect on the next redraw.
+    pet = load_state(os.path.join(CLAUDE_DIR, ".statusline-ctx", "config.json")).get("pet")
+    print(render(data if isinstance(data, dict) else {}, pet=pet if isinstance(pet, bool) else "--pet" in sys.argv[1:]))
 
 
 if __name__ == "__main__":
