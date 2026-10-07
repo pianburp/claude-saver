@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings, /pet, /wrapped and /toggle.
+"""Install claude-saver into ~/.claude: status line, hooks, /token-audit, /savings, /pet, /wrapped, /handoff and /toggle.
 
   --with-plugins  also install the ponytail + caveman plugins (via the `claude` CLI when on PATH)
   --graphify      also install graphify (PyPI: graphifyy) and its skill
@@ -58,8 +58,15 @@ If the caveman plugin is installed, offer `/caveman:caveman-compress` for files 
         "Show the status line pet: stage, age and lifetime tokens saved.",
         "Run `{run} pet` and print its output verbatim in a code block. Add nothing.",
     ),
+    "handoff": (
+        "Save a short task note before /clear; the next session in this project starts with it.",
+        """Run `{run} handoff`. It prints a file path.
+Use the Write tool to write a note for the next session to that path, 15 lines max, no preamble:
+goal, what is done, the next step, key files, gotchas and decisions already made.
+Then tell the user to run /clear. The next session in this project starts with the note, once.""",
+    ),
     "toggle": (
-        "Turn the pet, startup check, output guard or secret guard on or off mid-session. No args: list them.",
+        "Turn the pet, startup check, output guard, secret guard or read guards on or off mid-session. No args: list them.",
         "Run `{run} toggle $ARGUMENTS` and print its output verbatim in a code block. Add nothing.",
     ),
     "wrapped": (
@@ -68,7 +75,7 @@ If the caveman plugin is installed, offer `/caveman:caveman-compress` for files 
     ),
 }
 # saver.py subcommand each hook runs, and its matcher.
-HOOKS = {"SessionStart": ("startup", "check"), "PostToolUse": ("Bash", "guard"),
+HOOKS = {"SessionStart": ("startup|clear", "check"), "PostToolUse": ("Bash", "guard"),
          "PreToolUse": ("Bash|PowerShell|Read|Grep|Glob|Write|Edit|MultiEdit", "secrets")}
 
 
@@ -177,11 +184,17 @@ def apply_settings(settings, args, python, script):
     deny = settings.setdefault("permissions", {}).setdefault("deny", [])
     deny += [r for r in DENY_READS if r not in deny]
 
-    # check on new sessions only: after /compact or /resume the warning would just repeat.
+    # check on new sessions and /clear (for the /handoff note); it warns on startup only.
+    # After /compact or /resume the warning would just repeat.
     for event, (matcher, sub) in HOOKS.items():
         cmd = f'{python} "{os.path.join(os.path.dirname(script), "saver.py")}" {sub}'
         groups = settings.setdefault("hooks", {}).setdefault(event, [])
-        ours = [h for g in groups for h in g.get("hooks", []) if is_ours(h, " " + sub)]
+        ours = []
+        for g in groups:
+            mine = [h for h in g.get("hooks", []) if is_ours(h, " " + sub)]
+            if mine:
+                g["matcher"] = matcher  # rerun upgrades an older matcher
+            ours += mine
         for h in ours:  # rerun repoints hooks at the current Python, e.g. after the old one was uninstalled
             h["command"] = cmd
         if not ours:

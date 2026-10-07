@@ -154,7 +154,7 @@ assert "`npm test` printed ~7.5k" in hint["hookSpecificOutput"]["additionalConte
 assert out_of(saver.guard, {"tool_response": None}) == "" and out_of(saver.guard, []) == ""
 # secrets: .env reads denied, placeholders and .environment allowed; keys built by concatenation so this file stays writable
 def denied(tool, **ti):
-    out = out_of(saver.secrets, {"tool_name": tool, "tool_input": ti})
+    out = out_of(saver.pre_tool, {"tool_name": tool, "tool_input": ti})
     return out and json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
 env = "." + "env"
 assert '"' + env + '.local"' in denied("Bash", command=f"grep -i gemini {env}.local | sed s/KEY/x/")
@@ -164,7 +164,51 @@ aws = "AKIA" + "Q" * 16
 assert "AWS access key" in denied("Write", file_path="/app/config.ts", content=f"const k = '{aws}'")
 assert "private key" in denied("MultiEdit", file_path="/app/k.py", edits=[{"new_string": "-----BEGIN RSA PRIVATE" + " KEY-----"}])
 assert not denied("Edit", file_path=f"/app/{env}.local", new_string=f"AWS={aws}") and not denied("Write", file_path="/a.ts", content="sk-short")
-assert out_of(saver.secrets, []) == "" and out_of(saver.secrets, {"tool_input": None}) == ""
+assert out_of(saver.pre_tool, []) == "" and out_of(saver.pre_tool, {"tool_input": None}) == ""
+# read guards: lockfiles, minified and big files skipped whole, allowed with limit; media exempt
+lock, big_file, png = (os.path.join(home, n) for n in ("package-lock.json", "data.csv", "shot.png"))
+for p, n in ((lock, 10), (big_file, 50000), (png, 50000)):
+    open(p, "w").write("x" * n)
+assert "skipped ~12.5k tokens, a whole read of data.csv" in denied("Read", file_path=big_file)
+assert denied("Read", file_path=lock) and not denied("Read", file_path=big_file, limit=100) and not denied("Read", file_path=png)
+# re-read guard: an unchanged repeat is denied once, the next try passes; an edit resets it
+small = os.path.join(home, "small.py")
+open(small, "w").write("y")
+reread = lambda **ti: out_of(saver.pre_tool, {"tool_name": "Read", "session_id": "r1", "tool_input": dict(file_path=small, **ti)})
+assert reread() == "" and "unchanged since" in reread() and reread() == "" and reread(limit=5) == ""
+os.utime(small, (0, 0))
+assert reread() == ""
+# cmd_key: the command name and subcommand, without cd, flags, args in quotes or pipes
+assert [saver.cmd_key(c) for c in ("cd app && npm test -- --watch", "git log --oneline | head", "pytest", "echo 'x y'", "")] == \
+       ["npm test", "git log", "pytest", "echo", ""]
+# own savings: folder denial, guard-hook denial, quieter rerun, auto-compact
+call = lambda i, tool, inp: {"message": {"id": i, "role": "assistant", "usage": {}, "content": [
+    {"type": "tool_use", "id": "u" + i, "name": tool, "input": inp}]}}
+res = lambda i, text: {"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "u" + i, "content": text}]}}
+own = [call("1", "Read", {}), res("1", "Permission to read /a/node_modules has been denied."),
+       call("2", "Read", {}), res("2", "PreToolUse:Read hook: claude-saver: skipped ~12.5k tokens, a whole read of x"),
+       call("3", "Bash", {"command": "npm test"}), res("3", "z" * 12000),
+       {"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "auto", "preTokens": 9000, "postTokens": 1000}},
+       call("4", "Bash", {"command": "npm test -- --silent"}), res("4", "z" * 400),
+       {"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "manual", "preTokens": 9000, "postTokens": 1000}}]
+op = os.path.join(home, "own.jsonl")
+open(op, "w").write("\n".join(json.dumps(x) for x in own))
+rows = {r[0]: r[1] for r in saver.saved_rows(saver.session_stats(op))}
+# folder denial priced at the average Read result; compact: 8000 dropped × 1 later call × 10%
+per = sum(saver.tokens(own[i]["message"]["content"][0]["content"]) for i in (1, 3)) // 2
+assert rows == {"reads": per + 12500, "guard": 3000 - 100, "compact": 800}, rows
+# noisy memory: the guard counts per project, the startup check names it until CLAUDE.md mentions it
+for _ in range(3):
+    out_of(saver.guard, {"cwd": bare, "tool_input": {"command": "cd x && npm test"}, "tool_response": "x" * 9000})
+assert "`npm test` printed 2k+ tokens 3 times" in check_out(bare) and "/token-audit" not in check_out(bare), check_out(bare)
+open(os.path.join(bare, "CLAUDE.md"), "w").write("Run npm test with --silent.")
+assert check_out(bare) == ""
+# handoff: shown once on startup or /clear, then gone; warnings only on startup
+os.makedirs(os.path.dirname(saver.handoff_path(cwd)), exist_ok=True)
+open(saver.handoff_path(cwd), "w").write("Goal: ship it\n")
+out = out_of(saver.check, cwd, "clear")
+assert "Goal: ship it" in out and "extra.md" not in out and not os.path.exists(saver.handoff_path(cwd)), out
+assert "Goal" not in check_out(cwd) and out_of(saver.check, cwd, None) == ""
 
 # install: env defaults kept, hook added once, opusplan only with --orchestrate
 import install

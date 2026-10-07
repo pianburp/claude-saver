@@ -123,6 +123,11 @@ assert line2.startswith("⎿ 7d 40%") and line2.endswith("● 59m"), line2  # li
 # resets: clock under 24h away, weekday after
 import time
 assert ":" in sl.fmt_reset(time.time() + 20 * 3600) and ":" not in sl.fmt_reset(time.time() + 2 * 86400)
+# forecast: 63% one hour into 5h runs out before the reset; 10% does not; under 10 minutes in, no guess
+now = time.time()
+fl = lambda pct, opened: sl.fmt_limit("5h", {"used_percentage": pct, "resets_at": now - opened + 5 * 3600}, {}, now, 5 * 3600)
+assert "full " + sl.fmt_reset(now + 37 * 3600 / 63) in fl(63, 3600), fl(63, 3600)
+assert "full" not in fl(10, 3600) and "full" not in fl(63, 300) and "full" not in fl(0, 3600)
 # bar: any nonzero usage shows at least one cell
 assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == sl.BAR_WIDTH
 # /toggle pet: config.json overrides the --pet the installer baked in

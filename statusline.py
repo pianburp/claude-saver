@@ -2,7 +2,7 @@
 """Two-line status line styled after Claude Code's own UI.
 
 ✻ model · effort · active modes (ponytail, caveman) · saved · prompt cache (last 5 minutes only)
-⎿ context · 5h limit · 7d limit
+⎿ context · 5h limit · 7d limit (each with "full <time>" when the pace so far runs out before the reset)
 
 Tokens saved are credited to ~/.claude/.statusline-ctx/ledger.json (lifetime and per day) for /pet and /savings --week.
 With --pet (or /toggle pet on), Clawd (Claude Code's mascot, as on its welcome banner) stands left of the lines on three rows
@@ -173,7 +173,8 @@ def fmt_reset(epoch):
     return f"{dt:%a}"
 
 
-def fmt_limit(name, window, state, now):
+def fmt_limit(name, window, state, now, span):
+    """'5h 63% 4:32p', plus 'full 3:10p' when the pace so far hits 100% before the reset."""
     pct = to_pct((window or {}).get("used_percentage"))
     if pct is None:
         return ""
@@ -182,6 +183,13 @@ def fmt_limit(name, window, state, now):
     reset = fmt_reset((window or {}).get("resets_at"))
     if reset:
         out += " " + label(reset)
+        # ponytail: average pace since the window opened, not the last few minutes; sample pct in state if it lags
+        resets = int(window["resets_at"])
+        elapsed = now - (resets - span)
+        if elapsed >= 600 and pct > 0:
+            full = now + (100 - pct) * elapsed / pct
+            if full < resets:
+                out += " " + paint("full " + fmt_reset(full), RED)
     return out
 
 
@@ -423,13 +431,13 @@ def render(data, now=None, pet=False):
         # 10 points before auto-compact: compact by hand at a clean break instead of mid-task.
         # Also when the cache is about to expire: compacting while warm costs a fraction of re-billing it cold.
         if left <= 0 and ctx >= CLEAR_PCT:
-            ctx_part += " " + paint("/clear", YELLOW)
+            ctx_part += " " + paint("/handoff /clear", YELLOW)
         elif ctx >= compact_pct() - 10 or (left <= min(300, ttl / 6) and idle >= BUSY_SECS and ctx >= CLEAR_PCT):
             ctx_part += " " + paint("/compact", YELLOW)
     line2 = [
         ctx_part,
-        fmt_limit("5h", rate.get("five_hour"), state, now),
-        fmt_limit("7d", rate.get("seven_day"), state, now),
+        fmt_limit("5h", rate.get("five_hour"), state, now, 5 * 3600),
+        fmt_limit("7d", rate.get("seven_day"), state, now, 7 * 86400),
         fmt_cache(idle, frame, ttl),
     ]
 

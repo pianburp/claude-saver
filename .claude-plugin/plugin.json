@@ -1,7 +1,7 @@
 {
   "name": "ctx-saver",
-  "version": "1.3.0",
-  "description": "Spend fewer tokens in Claude Code: status line with context, limits and prompt cache countdown, auto-compact at 50%, deny rules for generated folders, a big-output guard, a secret guard, /token-audit, /savings, /wrapped and a status line pet.",
+  "version": "1.4.0",
+  "description": "Spend fewer tokens in Claude Code: status line with context, limits and prompt cache countdown, auto-compact at 50%, deny rules for generated folders, a big-output guard, a secret guard, read guards, /token-audit, /savings, /wrapped, /handoff, a limit forecast and a status line pet.",
   "author": { "name": "pianburp", "url": "https://github.com/pianburp" },
   "homepage": "https://github.com/pianburp/claude-saver",
   "repository": "https://github.com/pianburp/claude-saver",

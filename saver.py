@@ -7,9 +7,10 @@
   saver.py savings --week   tokens saved per day over the last 7 days (recorded by the status line)
   saver.py pet              the status line pet: stage, age, lifetime tokens saved
   saver.py wrapped          the last 7 days as a Wrapped-style HTML page, opened in the browser
-  saver.py guard            tells Claude when a Bash output is 2k+ tokens (PostToolUse hook)
-  saver.py secrets          blocks .env access and writes that hardcode a key (PreToolUse hook)
-  saver.py toggle [NAME [on|off]]  turn pet, check, guard or secrets on/off mid-session; no args lists them
+  saver.py guard            tells Claude when a Bash output is 2k+ tokens, and remembers the command (PostToolUse hook)
+  saver.py secrets          blocks .env access, hardcoded keys, lockfile/huge reads and unchanged re-reads (PreToolUse hook)
+  saver.py handoff          prints where /handoff writes its note; the next session's startup check shows it once
+  saver.py toggle [NAME [on|off]]  turn pet, check, guard, secrets or reads on/off mid-session; no args lists them
 
 Token counts are chars/4, the same approximation graphify and most tools use.
 """
@@ -25,7 +26,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 
-from statusline import detect_ttl
+from statusline import detect_ttl, save_state, state_path
 
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 LONG_FILE = 500  # tokens; Firecrawl's guide targets 200-500 for CLAUDE.md
@@ -38,6 +39,14 @@ PONYTAIL_CUT = 0.80
 GRAPHIFY_READS_AVOIDED = 5
 DEFAULT_READ_TOKENS = 1500  # used when the session has no Read calls to average
 NOISY = 2000  # tokens; a tool result this big rides along on every later call
+NOISY_REPEAT = 3  # the startup check names a command once the guard has flagged it this often
+CACHE_READ_PRICE = 0.1  # cache reads bill at 10% of input
+BIG_READ = 40_000  # bytes (~10k tokens); a whole Read of a file this big is skipped
+LOCKFILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "cargo.lock",
+             "composer.lock", "gemfile.lock", "uv.lock", "bun.lock"}
+MINIFIED = (".min.js", ".min.css", ".map")
+MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf", ".ipynb")  # Read handles these itself
+HANDOFF_DAYS = 7
 MANY_FILES = 1000  # a gitignored folder this big is flagged like node_modules
 HEAVY_DIRS = ("node_modules", "dist", "build", ".next", "__pycache__", "coverage", ".venv", "venv", "target")
 
@@ -67,6 +76,20 @@ def load_json(path):
 
 def project_slug(cwd):
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def ctx_file(*parts):
+    return os.path.join(CLAUDE_DIR, ".statusline-ctx", *parts)
+
+
+def cmd_key(cmd):
+    """`npm test` from `cd app && npm test -- --watch | tail`: up to two words, before any flag, quote, pipe or redirect."""
+    words = []
+    for w in re.sub(r"^\s*cd\s+\S+\s*(?:&&|;)\s*", "", str(cmd)).split():
+        if len(words) == 2 or w[0] in "-'\"|<>&;$(`":
+            break
+        words.append(w)
+    return " ".join(words)
 
 
 # ---------- audit ----------
@@ -278,8 +301,32 @@ def audit(cwd):
             print(f"  - {tip}")
 
 
-def check(cwd):
-    """One line when something costs tokens every session, nothing otherwise: hook output costs context."""
+def handoff_path(cwd):
+    return ctx_file("handoff", project_slug(os.path.abspath(cwd)) + ".md")
+
+
+def noisy_counts(cwd):
+    """{command key: times the guard flagged it} for this project."""
+    data = load_json(ctx_file("noisy.json"))
+    counts = data.get(os.path.normcase(os.path.abspath(cwd))) if isinstance(data, dict) else None
+    return counts if isinstance(counts, dict) else {}
+
+
+def check(cwd, source="startup"):
+    """The /handoff note once, then (new sessions only) one line when something costs tokens every session.
+
+    source is SessionStart's: "startup" warns, "clear" only shows the note, None (switched off) only the note.
+    Nothing otherwise: hook output costs context.
+    """
+    note_path = handoff_path(cwd)
+    note = read(note_path)
+    if note is not None:
+        fresh = time.time() - os.path.getmtime(note_path) < HANDOFF_DAYS * 86400
+        os.remove(note_path)  # one-shot: a stale task note misleads more than it helps
+        if fresh and note.strip():
+            print("claude-saver: handoff note from the last session (from /handoff):\n" + note.strip())
+    if source != "startup":
+        return
     files = always_loaded(cwd)
     flagged = [os.path.basename(p) for p, t in files
                if any(f.startswith(("long", "truncated")) for f in file_findings(p, t, cwd))]
@@ -293,9 +340,17 @@ def check(cwd):
     servers = mcp_servers(cwd)
     if servers and tool_search_off(cwd):
         issues.append(f"{len(servers)} MCP server(s) with ENABLE_TOOL_SEARCH off")
+    tip = (" Tell the user to run /token-audit" + (" or /doctor prompt-audit (stale or conflicting lines)." if flagged else ".")
+           if issues else "")
+    # Once the user notes the command in CLAUDE.md (or any always-loaded file), this goes quiet.
+    loaded = "\n".join(t for _, t in files)
+    loud = sorted(((n, k) for k, n in noisy_counts(cwd).items()
+                   if isinstance(n, int) and n >= NOISY_REPEAT and k not in loaded), reverse=True)
+    if loud:
+        n, k = loud[0]
+        issues.append(f"`{k}` printed 2k+ tokens {n} times; add its quiet flag to CLAUDE.md")
     if issues:
-        print(f"claude-saver: {'; '.join(issues)}. Tell the user to run /token-audit"
-              + (" or /doctor prompt-audit (stale or conflicting lines)." if flagged else "."))
+        print(f"claude-saver: {'; '.join(issues)}.{tip}")
 
 
 # ---------- savings ----------
@@ -320,8 +375,8 @@ def session_stats(path):
     s = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0,
          "text": 0, "code": 0, "caveman": False, "ponytail": False,
          "reads": [], "graph_queries": [], "graph_results": 0, "noisy": [], "model_switches": 0,
-         "cwd": None, "stamps": []}
-    seen, tool_names, tool_labels, results, model = set(), {}, {}, {}, None
+         "cwd": None, "stamps": [], "denied": [], "compacts": [], "main_calls": 0}
+    seen, tool_names, tool_labels, results, commands, model = set(), {}, {}, {}, {}, None
     files = [path] + glob.glob(os.path.join(os.path.splitext(path)[0], "subagents", "*.jsonl"))
     for f in files:
         for line in (read(f) or "").splitlines():
@@ -333,6 +388,10 @@ def session_stats(path):
                 entry = json.loads(line)
             except ValueError:
                 continue
+            meta = entry.get("compactMetadata") if isinstance(entry, dict) else None
+            if f == path and isinstance(meta, dict) and meta.get("trigger") == "auto":
+                dropped = (meta.get("preTokens") or 0) - (meta.get("postTokens") or 0)
+                s["compacts"].append((max(0, dropped), s["calls"]))
             msg = entry.get("message") if isinstance(entry, dict) else None
             if not isinstance(msg, dict):
                 continue
@@ -371,10 +430,29 @@ def session_stats(path):
                         code += "".join(e.get("new_string", "") for e in args.get("edits") or [])
                         s["code"] += tokens(code)
                     cmd = str(args.get("command", ""))
+                    if name == "Bash":
+                        commands[block.get("id")] = cmd
                     if "graphify" in name or re.search(r"\bgraphify\s+(query|path|explain)\b", cmd):
                         s["graph_queries"].append(block.get("id"))
                 elif kind == "tool_result":
-                    results[block.get("tool_use_id")] = tokens(result_text(block.get("content")))
+                    text = result_text(block.get("content"))
+                    results[block.get("tool_use_id")] = tokens(text)
+                    if tool_names.get(block.get("tool_use_id")) == "Read":
+                        if re.match(r"Permission to read .+ has been denied", text):
+                            s["denied"].append(None)  # size unknown: priced at the average read
+                        hit = re.search(r"claude-saver: skipped[^~]*~([\d.]+)([kM]?) tokens", text)
+                        if hit:
+                            s["denied"].append(float(hit.group(1)) * {"": 1, "k": 1e3, "M": 1e6}[hit.group(2)])
+        if f == path:
+            s["main_calls"] = s["calls"]
+    # Guard: a noisy command run again with less output, e.g. after the hint, saved the difference.
+    s["guard_saved"], first = 0, {}
+    for i, n in results.items():
+        key = cmd_key(commands[i]) if i in commands else ""
+        if key in first:
+            s["guard_saved"] += max(0, first.pop(key) - n)
+        elif key and n >= NOISY:
+            first[key] = n
     s["tools"] = Counter(tool_names.values())
     s["reads"] = [n for i, n in results.items() if tool_names.get(i) == "Read"]
     s["graph_results"] = sum(results.get(i, 0) for i in s["graph_queries"])
@@ -386,6 +464,7 @@ def session_stats(path):
 def saved_rows(s):
     """Estimated savings as (name, tokens, kind, why); shared by /savings and the status line."""
     rows = []
+    per_read = sum(s["reads"]) // len(s["reads"]) if s["reads"] else DEFAULT_READ_TOKENS
     if s["caveman"] and s["text"]:
         rows.append(("caveman", s["text"] * CAVEMAN_CUT / (1 - CAVEMAN_CUT), "output",
                      f"{CAVEMAN_CUT:.0%} avg cut on {fmt(s['text'])} reply tokens (caveman benchmark)"))
@@ -393,10 +472,20 @@ def saved_rows(s):
         rows.append(("ponytail", s["code"] * PONYTAIL_CUT / (1 - PONYTAIL_CUT), "output",
                      f"{PONYTAIL_CUT:.0%} fewer lines on {fmt(s['code'])} code tokens (ponytail benchmark, low end)"))
     if s["graph_queries"]:
-        per_read = sum(s["reads"]) // len(s["reads"]) if s["reads"] else DEFAULT_READ_TOKENS
         saved = max(0, len(s["graph_queries"]) * GRAPHIFY_READS_AVOIDED * per_read - s["graph_results"])
         rows.append(("graphify", saved, "input",
                      f"{len(s['graph_queries'])} queries × {GRAPHIFY_READS_AVOIDED} reads of ~{fmt(per_read)} avoided (assumption)"))
+    if s["denied"]:
+        rows.append(("reads", sum(n or per_read for n in s["denied"]), "input",
+                     f"{len(s['denied'])} reads blocked by deny rules or the read guards (folder denials at ~{fmt(per_read)} each)"))
+    if s["guard_saved"]:
+        rows.append(("guard", s["guard_saved"], "input", "noisy commands run again with less output"))
+    # ponytail: credits every auto-compact, not only the head start CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50 gives;
+    # a second compact does not cut the first one's credit short.
+    compact = sum(d * (s["main_calls"] - at) for d, at in s["compacts"]) * CACHE_READ_PRICE
+    if compact:
+        rows.append(("compact", compact, "input",
+                     f"{len(s['compacts'])} auto-compact(s): dropped tokens × later calls, at the 10% cache-read price"))
     return rows
 
 
@@ -411,7 +500,7 @@ def savings(path, cwd):
     rows = saved_rows(s)
     print("Saved **estimated")
     if not rows:
-        print("  nothing yet: caveman, ponytail and graphify were not used in this session")
+        print("  nothing yet: no caveman, ponytail or graphify use, blocked reads, quieter reruns or auto-compacts")
     for name, n, kind, why in rows:
         print(f"  {name:<9} {'~' + fmt(n):>7} {kind:<6}  {why}")
     if rows:
@@ -535,7 +624,7 @@ def wrapped(today=None, show=True):
     cards.append(("Claude wrote", f"{fmt(sum(s['output'] for s in stats))} tokens",
                   f"and re-read {fmt(sum(s['cache_read'] for s in stats))} from cache at a tenth of the price"))
     if saved:
-        cards.append(("Saved", f"~{fmt(saved)}", "tokens, estimated from caveman, ponytail and graphify"))
+        cards.append(("Saved", f"~{fmt(saved)}", "tokens, estimated: modes, graphify, guards and auto-compact"))
     if loud:
         cards.append(("Loudest command", f"{fmt(loud[0])} tokens", loud[1]))
 
@@ -574,6 +663,14 @@ def guard(event):
     if n < NOISY:
         return
     cmd = str((event.get("tool_input") or {}).get("command", ""))[:60]
+    key = cmd_key(cmd)
+    if key:  # remembered per project for the startup check
+        # ponytail: read-modify-write like the ledger; two guards in the same instant can drop one count
+        data = load_json(ctx_file("noisy.json"))
+        data = data if isinstance(data, dict) else {}
+        counts = data.setdefault(os.path.normcase(os.path.abspath(event.get("cwd") or os.getcwd())), {})
+        counts[key] = (counts.get(key) or 0) + 1
+        save_state(ctx_file("noisy.json"), data)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": (
         f"claude-saver: `{cmd}` printed ~{fmt(n)} tokens, re-sent on every later call. "
         "Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.")}}))
@@ -596,7 +693,7 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
 
 
 def secrets(event):
-    """PreToolUse hook: deny touching .env files, and writes that hardcode a credential."""
+    """Deny reason for touching .env files or writes that hardcode a credential, else None."""
     ti = event.get("tool_input") if isinstance(event, dict) else None
     if not isinstance(ti, dict):
         return
@@ -618,9 +715,63 @@ def secrets(event):
             reason = (f'Blocked: "{hit}" holds live secrets. Printing one into the transcript cannot be undone: '
                       "the user has to rotate the credential. Read the code default, .env.example or README.md instead. "
                       "To check a variable is set, print a boolean, never the value. Do not trust a redaction pattern.")
-    if reason:
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+    return reason
+
+
+def read_target(event):
+    """(path, os.stat) for a Read call on an existing file, else None."""
+    if not isinstance(event, dict) or event.get("tool_name") != "Read" or not isinstance(event.get("tool_input"), dict):
+        return None
+    path = str(event["tool_input"].get("file_path") or "")
+    try:
+        return path, os.stat(path)
+    except (OSError, ValueError):
+        return None
+
+
+def reads(event):
+    """Deny reason for a whole Read of a lockfile, minified file or file over BIG_READ, else None."""
+    target = read_target(event)
+    if not target or event["tool_input"].get("offset") or event["tool_input"].get("limit"):
+        return None
+    path, st = target
+    name = os.path.basename(path).lower()
+    if name in LOCKFILES or name.endswith(MINIFIED) or (st.st_size > BIG_READ and not name.endswith(MEDIA)):
+        return (f"claude-saver: skipped ~{fmt(st.st_size // 4)} tokens, a whole read of {os.path.basename(path)}. "
+                "Grep it for what you need, or Read it with offset and limit.")
+    return None
+
+
+def rereads(event):
+    """Deny reason the first time an unchanged file is read again in a session; the next attempt goes through."""
+    target = read_target(event)
+    base = state_path(event.get("session_id")) if target else None
+    if not base:
+        return None
+    path, st = target
+    ti = event["tool_input"]
+    seen = load_json(base + ".reads")
+    seen = seen if isinstance(seen, dict) else {}
+    key = json.dumps([os.path.normcase(os.path.abspath(path)), ti.get("offset"), ti.get("limit")])
+    stamp, old = [st.st_mtime, st.st_size], seen.get(key)
+    # Denied once already: let it through, the content likely left context (compaction).
+    repeat = isinstance(old, list) and old[:2] == stamp and old[2:] != [True]
+    seen[key] = stamp + [repeat]
+    save_state(base + ".reads", seen)
+    if repeat:
+        return (f"claude-saver: skipped ~{fmt(st.st_size // 4)} tokens, {os.path.basename(path)} is unchanged since "
+                "your last read of it this session. Use what you read. If it left context (compaction), Read it again.")
+    return None
+
+
+def pre_tool(event):
+    """PreToolUse hook: the first deny reason from the switches that are on."""
+    for name, fn in (("secrets", secrets), ("reads", reads), ("reads", rereads)):
+        reason = is_on(name) and fn(event)
+        if reason:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
+            return
 
 
 # ---------- toggle ----------
@@ -630,6 +781,7 @@ SWITCHES = {
     "check": "startup check (SessionStart hook)",
     "guard": "big-output guard (PostToolUse hook)",
     "secrets": "secret guard: blocks .env reads and hardcoded keys (PreToolUse hook)",
+    "reads": "read guards: lockfiles, minified or huge whole-file reads, unchanged re-reads (PreToolUse hook)",
 }
 
 
@@ -675,14 +827,23 @@ def main():
         pass
     args = sys.argv[1:]
     cwd = os.getcwd()
-    if args[:1] in (["check"], ["guard"], ["secrets"]) and not is_on(args[0]):
-        return  # switched off with /toggle
+    if args[:1] == ["guard"] and not is_on("guard"):
+        return  # switched off with /toggle; check and secrets test their switches themselves
     if args[:1] == ["audit"]:
         audit(cwd)
     elif args[:1] == ["toggle"]:
         toggle(args[1:])
     elif args[:1] == ["check"]:
-        check(cwd)
+        source = "startup"
+        if not sys.stdin.isatty():  # the hook's SessionStart event; a hand run has none
+            try:
+                source = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}").get("source") or source
+            except (ValueError, AttributeError):
+                pass
+        check(cwd, source if is_on("check") else None)  # the handoff note shows even with check off
+    elif args[:1] == ["handoff"]:
+        os.makedirs(os.path.dirname(handoff_path(cwd)), exist_ok=True)
+        print(handoff_path(cwd))
     elif args[:2] == ["savings", "--week"]:
         week()
     elif args[:1] == ["savings"]:
@@ -693,7 +854,7 @@ def main():
         wrapped()
     elif args[:1] in (["guard"], ["secrets"]):
         try:
-            {"guard": guard, "secrets": secrets}[args[0]](json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
+            {"guard": guard, "secrets": pre_tool}[args[0]](json.loads(sys.stdin.buffer.read().decode("utf-8", "replace")))
         except ValueError:
             pass
     else:
