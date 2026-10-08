@@ -68,7 +68,7 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 
 - **Line 1:** model, effort (`lo`, `med`, `hi`, `xhi`, `max`), active ponytail/caveman modes, `saved` (estimated tokens saved this session, the `total` row of [`/savings`](#savings)).
 - **Line 2:** `ctx` is context used. `5h` and `7d` are your usage limits and when they reset: the time when under 24h away, else the day.
-  `full 11:40a` (red) shows when your average pace since the window opened hits 100% before the reset. It needs 10 minutes of data.
+  `full 11:40a` (red) shows when your average pace since the window opened hits 100% before the reset. It waits until a tenth of the window has passed (30 minutes of 5h, about 17 hours of 7d).
   `● 52m` is time left on the prompt cache. The pie drains `● ◕ ◑ ◔` as it runs down, gray until its last 5 minutes, `○ cold` once it expires.
   After that, the next message re-reads the whole conversation at full price.
 - Numbers go green, then yellow at 50%, then red at 80%. The context bar stays Claude orange under 50%.

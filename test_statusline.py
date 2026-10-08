@@ -128,6 +128,8 @@ now = time.time()
 fl = lambda pct, opened: sl.fmt_limit("5h", {"used_percentage": pct, "resets_at": now - opened + 5 * 3600}, {}, now, 5 * 3600)
 assert "full " + sl.fmt_reset(now + 37 * 3600 / 63) in fl(63, 3600), fl(63, 3600)
 assert "full" not in fl(10, 3600) and "full" not in fl(63, 300) and "full" not in fl(0, 3600)
+# 7d window opened 1h ago at 1%: too early to forecast
+assert "full" not in sl.fmt_limit("7d", {"used_percentage": 1, "resets_at": now - 3600 + 7 * 86400}, {}, now, 7 * 86400)
 # bar: any nonzero usage shows at least one cell
 assert sl.bar(5).count("█") == 1 and sl.bar(0).count("█") == 0 and sl.bar(100).count("█") == sl.BAR_WIDTH
 # /toggle pet: config.json overrides the --pet the installer baked in

@@ -186,7 +186,8 @@ def fmt_limit(name, window, state, now, span):
         # ponytail: average pace since the window opened, not the last few minutes; sample pct in state if it lags
         resets = int(window["resets_at"])
         elapsed = now - (resets - span)
-        if elapsed >= 600 and pct > 0:
+        # A tenth of the window (30m of 5h, ~17h of 7d): earlier, one rounded percent swings the forecast by days
+        if elapsed >= span / 10 and pct > 0:
             full = now + (100 - pct) * elapsed / pct
             if full < resets:
                 out += " " + paint("full " + fmt_reset(full), RED)
