@@ -7,7 +7,7 @@
   saver.py savings --week   tokens saved per day over the last 7 days (recorded by the status line)
   saver.py pet              the status line pet: stage, age, lifetime tokens saved
   saver.py wrapped          the last 7 days as a Wrapped-style HTML page, opened in the browser
-  saver.py guard            tells Claude when a Bash output is 2k+ tokens, and remembers the command (PostToolUse hook)
+  saver.py guard            tells Claude when a tool output is 2k+ tokens, and remembers the command (PostToolUse hook)
   saver.py secrets          blocks .env access, hardcoded keys, lockfile/huge reads and unchanged re-reads (PreToolUse hook)
   saver.py handoff          prints where /handoff writes its note; the next session's startup check shows it once
   saver.py toggle [NAME [on|off]]  turn pet, check, guard, secrets or reads on/off mid-session; no args lists them
@@ -248,6 +248,56 @@ def unpinned_agents(cwd):
     return sorted(out)
 
 
+def plugin_listings(cwd):
+    """(plugin, items, tokens) for each enabled plugin's skills, agents and commands, listed to Claude every call."""
+    enabled = {}
+    for path in settings_files(cwd):
+        enabled.update(load_json(path).get("enabledPlugins") or {})
+    installed = load_json(os.path.join(CLAUDE_DIR, "plugins", "installed_plugins.json")).get("plugins") or {}
+    out = []
+    for name, on in enabled.items():
+        # ponytail: first install path wins; a plugin installed twice at different versions is counted once
+        root = next((e.get("installPath") for e in installed.get(name) or [] if isinstance(e, dict) and e.get("installPath")), None)
+        if on is not True or not root:
+            continue
+        n = total = 0
+        for pattern in ("skills/*/SKILL.md", "agents/*.md", "commands/*.md"):
+            for path in glob.glob(os.path.join(root, pattern)):
+                front = (re.match(r"---\r?\n(.*?)\r?\n---", read(path) or "", re.S) or [""])[0]
+                if front and not re.search(r"(?m)^disable-model-invocation\s*:\s*true", front):
+                    n, total = n + 1, total + tokens(front)
+        if n:
+            out.append((name.split("@")[0], n, total))
+    return sorted(out, key=lambda p: -p[2])
+
+
+def hook_injections(path):
+    """{source: [tokens, times]} for hook text added to context in a transcript (SessionStart stdout, additionalContext).
+
+    Source is the text's first word: `CAVEMAN MODE ACTIVE` counts as caveman, `claude-saver:` as claude-saver.
+    """
+    out = {}
+    for line in ((read(path) if path else None) or "").splitlines():
+        try:
+            att = json.loads(line).get("attachment")
+        except (ValueError, AttributeError):
+            continue
+        if not isinstance(att, dict):
+            continue
+        if att.get("type") == "hook_additional_context":
+            texts = att.get("content") if isinstance(att.get("content"), list) else [att.get("content")]
+        elif att.get("type") == "hook_success" and att.get("hookEvent") == "SessionStart":
+            texts = [att.get("content")]  # plain stdout becomes context; JSON output arrives as hook_additional_context
+        else:
+            continue
+        for text in texts:
+            if isinstance(text, str) and text.strip() and not text.lstrip().startswith("{"):
+                name = re.match(r"[\w-]*", text.strip()).group().lower() or "other"
+                row = out.setdefault(name, [0, 0])
+                row[0], row[1] = row[0] + tokens(text), row[1] + 1
+    return out
+
+
 def tool_search_off(cwd):
     return (env_value("ENABLE_TOOL_SEARCH", cwd) or "").lower() in ("0", "false")
 
@@ -289,6 +339,16 @@ def audit(cwd):
     skills = glob.glob(os.path.join(CLAUDE_DIR, "skills", "*", "SKILL.md")) + glob.glob(os.path.join(cwd, ".claude", "skills", "*", "SKILL.md"))
     if skills:
         tips.append(f"{len(skills)} user/project skill(s), ~30-100 tokens each for the description. Skills you only run by hand: add `disable-model-invocation: true`.")
+    plugins = plugin_listings(cwd)
+    if plugins:
+        listed = ", ".join(f"{name} {n} (~{fmt(t)})" for name, n, t in plugins)
+        tips.append(f"Plugins list skills and agents on every call: {listed}. "
+                    "Disable plugins you do not use with /plugin.")
+    injected = hook_injections(newest_transcript(cwd))
+    if injected:
+        listed = ", ".join(f"{name} ~{fmt(t)} ({n}x)" for name, (t, n) in sorted(injected.items(), key=lambda p: -p[1][0]))
+        tips.append(f"Hooks added text to the last session: {listed}. It stays in history and is re-read on every "
+                    "later call. Turn off modes you do not need for the task (stop caveman, stop ponytail, /plugin).")
     if not any(re.search(r"(?im)^#+\s*compact instructions", t) for _, t in files):
         tips.append("No \"## Compact instructions\" section in CLAUDE.md. Add one to say what /compact and auto-compact must keep.")
     if not env_value("BASH_MAX_OUTPUT_LENGTH", cwd):
@@ -370,24 +430,52 @@ def result_text(content):
     return content if isinstance(content, str) else ""
 
 
+STOP_WORDS = {"caveman": ("stop caveman", "normal mode"), "ponytail": ("stop ponytail", "normal mode")}
+
+
+def mode_switch(entry, on, s):
+    """Turn caveman/ponytail on at a hook's MODE ACTIVE marker, off at the user's stop phrase.
+
+    The marker counts in hook output and user messages, never in a tool result or an edited file that quotes it.
+    The stop phrase counts only in a prompt the user typed: skill bodies (isMeta) quote it in their instructions.
+    """
+    if not isinstance(entry, dict):
+        return
+    msg, att, typed = entry.get("message"), entry.get("attachment"), False
+    if isinstance(att, dict) and str(att.get("type", "")).startswith("hook_"):
+        text = json.dumps(att)
+    elif isinstance(msg, dict) and msg.get("role") == "user":
+        content = msg.get("content")
+        text = content if isinstance(content, str) else "".join(
+            c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text")
+        typed = not entry.get("isMeta")
+    else:
+        return
+    for name in on:
+        if f"{name.upper()} MODE ACTIVE" in text:
+            on[name] = s[name] = True
+        elif typed and any(w in text.lower() for w in STOP_WORDS[name]):
+            on[name] = False
+
+
 def session_stats(path):
     """Usage deduped by message id (one transcript line per content block) plus content sizes."""
     s = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0,
          "text": 0, "code": 0, "caveman": False, "ponytail": False,
+         "cave_text": 0, "on_text": 0, "on_replies": 0, "off_text": 0, "off_replies": 0, "pony_code": 0,
          "reads": [], "graph_queries": [], "graph_results": 0, "noisy": [], "model_switches": 0,
          "cwd": None, "stamps": [], "denied": [], "compacts": [], "main_calls": 0}
     seen, tool_names, tool_labels, results, commands, model = set(), {}, {}, {}, {}, None
     files = [path] + glob.glob(os.path.join(os.path.splitext(path)[0], "subagents", "*.jsonl"))
     for f in files:
+        # ponytail: each subagent file starts with both modes off; its replies earn credit only if a hook marked it
+        on = {"caveman": False, "ponytail": False}
         for line in (read(f) or "").splitlines():
-            if "CAVEMAN MODE ACTIVE" in line:
-                s["caveman"] = True
-            if "PONYTAIL MODE ACTIVE" in line:
-                s["ponytail"] = True
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
+            mode_switch(entry, on, s)
             meta = entry.get("compactMetadata") if isinstance(entry, dict) else None
             if f == path and isinstance(meta, dict) and meta.get("trigger") == "auto":
                 dropped = (meta.get("preTokens") or 0) - (meta.get("postTokens") or 0)
@@ -419,7 +507,14 @@ def session_stats(path):
                     continue
                 kind = block.get("type")
                 if kind == "text" and msg.get("role") == "assistant":
-                    s["text"] += tokens(block.get("text", ""))
+                    n = tokens(block.get("text", ""))
+                    s["text"] += n
+                    if on["caveman"]:
+                        s["cave_text"] += n
+                    if f == path:  # main thread only: the measured cut compares like with like
+                        mode = "on" if on["caveman"] else "off"
+                        s[mode + "_text"] += n
+                        s[mode + "_replies"] += 1
                 elif kind == "tool_use":
                     name, args = block.get("name", ""), block.get("input") or {}
                     tool_names[block.get("id")] = name
@@ -429,6 +524,8 @@ def session_stats(path):
                         code = args.get("content") or args.get("new_string") or args.get("new_source") or ""
                         code += "".join(e.get("new_string", "") for e in args.get("edits") or [])
                         s["code"] += tokens(code)
+                        if on["ponytail"]:
+                            s["pony_code"] += tokens(code)
                     cmd = str(args.get("command", ""))
                     if name == "Bash":
                         commands[block.get("id")] = cmd
@@ -437,12 +534,11 @@ def session_stats(path):
                 elif kind == "tool_result":
                     text = result_text(block.get("content"))
                     results[block.get("tool_use_id")] = tokens(text)
-                    if tool_names.get(block.get("tool_use_id")) == "Read":
-                        if re.match(r"Permission to read .+ has been denied", text):
-                            s["denied"].append(None)  # size unknown: priced at the average read
-                        hit = re.search(r"claude-saver: skipped[^~]*~([\d.]+)([kM]?) tokens", text)
-                        if hit:
-                            s["denied"].append(float(hit.group(1)) * {"": 1, "k": 1e3, "M": 1e6}[hit.group(2)])
+                    if tool_names.get(block.get("tool_use_id")) == "Read" and re.match(r"Permission to read .+ has been denied", text):
+                        s["denied"].append(None)  # size unknown: priced at the average read
+                    hit = re.search(r"claude-saver: skipped[^~]*~([\d.]+)([kM]?) tokens", text)
+                    if hit and tool_names.get(block.get("tool_use_id")) in ("Read",) + SHELLS:
+                        s["denied"].append(float(hit.group(1)) * {"": 1, "k": 1e3, "M": 1e6}[hit.group(2)])
         if f == path:
             s["main_calls"] = s["calls"]
     # Guard: a noisy command run again with less output, e.g. after the hint, saved the difference.
@@ -465,12 +561,14 @@ def saved_rows(s):
     """Estimated savings as (name, tokens, kind, why); shared by /savings and the status line."""
     rows = []
     per_read = sum(s["reads"]) // len(s["reads"]) if s["reads"] else DEFAULT_READ_TOKENS
-    if s["caveman"] and s["text"]:
-        rows.append(("caveman", s["text"] * CAVEMAN_CUT / (1 - CAVEMAN_CUT), "output",
-                     f"{CAVEMAN_CUT:.0%} avg cut on {fmt(s['text'])} reply tokens (caveman benchmark)"))
-    if s["ponytail"] and s["code"]:
-        rows.append(("ponytail", s["code"] * PONYTAIL_CUT / (1 - PONYTAIL_CUT), "output",
-                     f"{PONYTAIL_CUT:.0%} fewer lines on {fmt(s['code'])} code tokens (ponytail benchmark, low end)"))
+    # Upper bounds: they assume every reply was cut by the benchmark rate, and a reply that drifted long still earns it.
+    if s["cave_text"]:
+        rows.append(("caveman", s["cave_text"] * CAVEMAN_CUT / (1 - CAVEMAN_CUT), "output",
+                     f"up to {CAVEMAN_CUT:.0%} cut on {fmt(s['cave_text'])} reply tokens while on (caveman benchmark)"))
+    if s["pony_code"]:
+        rows.append(("ponytail", s["pony_code"] * PONYTAIL_CUT / (1 - PONYTAIL_CUT), "output",
+                     f"up to {PONYTAIL_CUT:.0%} fewer lines on {fmt(s['pony_code'])} code tokens while on "
+                     "(ponytail benchmark, low end)"))
     if s["graph_queries"]:
         saved = max(0, len(s["graph_queries"]) * GRAPHIFY_READS_AVOIDED * per_read - s["graph_results"])
         rows.append(("graphify", saved, "input",
@@ -506,6 +604,7 @@ def savings(path, cwd):
     if rows:
         print(f"  {'total':<9} {'~' + fmt(sum(r[1] for r in rows)):>7}")
     print(f"\n  prompt cache  {fmt(s['cache_read'])} input tokens billed at 10% (exact, built into Claude Code)")
+    print(f"  caveman       {measured_cut(cwd)}")
 
     if s["noisy"]:
         print("\nBiggest tool outputs (re-read on every later call; use quiet flags or a subagent):")
@@ -519,6 +618,25 @@ def savings(path, cwd):
     if memory:
         print(f"\nOverhead: CLAUDE.md + memory ~{fmt(memory)} tokens × {s['calls']} calls = "
               f"~{fmt(memory * s['calls'])}. Run /token-audit to trim it.")
+
+
+MEASURE_SESSIONS, MEASURE_MIN = 30, 20  # newest transcripts read; replies needed on each side
+
+
+def measured_cut(cwd):
+    """Caveman's real cut in this project: average reply size with it on vs off, newest sessions."""
+    found = sorted(glob.glob(os.path.join(CLAUDE_DIR, "projects", project_slug(cwd), "*.jsonl")),
+                   key=os.path.getmtime)[-MEASURE_SESSIONS:]
+    t = Counter()
+    for p in found:
+        s = session_stats(p)
+        t.update({k: s[k] for k in ("on_text", "on_replies", "off_text", "off_replies")})
+    if min(t["on_replies"], t["off_replies"]) < MEASURE_MIN:
+        return (f"measured: not enough replies yet ({t['on_replies']} on, {t['off_replies']} off, "
+                f"{MEASURE_MIN} each needed). Work a session with `stop caveman` to compare.")
+    on, off = t["on_text"] / t["on_replies"], t["off_text"] / t["off_replies"]
+    return (f"measured: replies avg {fmt(on)} tokens on vs {fmt(off)} off, {1 - on / off:.0%} shorter "
+            f"({t['on_replies']}/{t['off_replies']} replies, last {len(found)} sessions; tasks differ, so rough)")
 
 
 def ledger():
@@ -650,19 +768,44 @@ def wrapped(today=None, show=True):
         webbrowser.open(Path(out).as_uri())
 
 
+SHELLS = ("Bash", "PowerShell")
+# Next-time advice per tool; anything else (MCP and the rest) gets the default.
+GUARD_HINTS = {
+    "Grep": "Next time pass head_limit, or output_mode files_with_matches or count.",
+    "Glob": "Next time narrow the pattern or the path.",
+    "WebFetch": "Next time ask the fetch prompt for only the part you need.",
+    "Agent": "Next time tell the subagent to answer in a few lines.",
+    "Task": "Next time tell the subagent to answer in a few lines.",
+}
+
+
 def guard(event):
-    """PostToolUse hook: tell Claude a Bash output rides along on every later call. Silent under NOISY."""
-    resp = event.get("tool_response") if isinstance(event, dict) else None
-    if isinstance(resp, dict):
+    """PostToolUse hook: tell Claude a big tool output rides along on every later call. Silent under NOISY."""
+    if not isinstance(event, dict):
+        return
+    tool, resp = event.get("tool_name") or "Bash", event.get("tool_response")
+    ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    if isinstance(resp, dict) and ("stdout" in resp or "stderr" in resp):
         resp = "".join(str(resp.get(k) or "") for k in ("stdout", "stderr"))
-    try:
-        cap = int(os.environ.get("BASH_MAX_OUTPUT_LENGTH") or 30000)  # Claude Code's default cut, in chars
-    except ValueError:
-        cap = 30000
-    n = tokens(resp[:cap]) if isinstance(resp, str) else 0
+    elif resp is not None and not isinstance(resp, str):
+        resp = json.dumps(resp)  # Grep, Glob, MCP and Agent results: the JSON is close to what Claude sees
+    if not isinstance(resp, str):
+        return
+    if tool in SHELLS:
+        try:
+            resp = resp[:int(os.environ.get("BASH_MAX_OUTPUT_LENGTH") or 30000)]  # Claude Code's default cut, in chars
+        except ValueError:
+            resp = resp[:30000]
+    n = tokens(resp)
     if n < NOISY:
         return
-    cmd = str((event.get("tool_input") or {}).get("command", ""))[:60]
+    if tool not in SHELLS:
+        label = f"{tool} `{str(ti.get('pattern'))[:40]}`" if ti.get("pattern") else tool
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": (
+            f"claude-saver: {label} returned ~{fmt(n)} tokens, re-sent on every later call. "
+            + GUARD_HINTS.get(tool, "Next time narrow the query or ask for fewer fields."))}}))
+        return
+    cmd = str(ti.get("command", ""))[:60]
     key = cmd_key(cmd)
     if key:  # remembered per project for the startup check
         # ponytail: read-modify-write like the ledger; two guards in the same instant can drop one count
@@ -729,17 +872,39 @@ def read_target(event):
         return None
 
 
+def too_big(path, st):
+    """Why a whole read of this file wastes tokens, else None."""
+    name = os.path.basename(path).lower()
+    if name in LOCKFILES or name.endswith(MINIFIED) or (st.st_size > BIG_READ and not name.endswith(MEDIA)):
+        return f"claude-saver: skipped ~{fmt(st.st_size // 4)} tokens, a whole read of {os.path.basename(path)}. "
+    return None
+
+
 def reads(event):
     """Deny reason for a whole Read of a lockfile, minified file or file over BIG_READ, else None."""
     target = read_target(event)
     if not target or event["tool_input"].get("offset") or event["tool_input"].get("limit"):
         return None
-    path, st = target
-    name = os.path.basename(path).lower()
-    if name in LOCKFILES or name.endswith(MINIFIED) or (st.st_size > BIG_READ and not name.endswith(MEDIA)):
-        return (f"claude-saver: skipped ~{fmt(st.st_size // 4)} tokens, a whole read of {os.path.basename(path)}. "
-                "Grep it for what you need, or Read it with offset and limit.")
-    return None
+    reason = too_big(*target)
+    return reason and reason + "Grep it for what you need, or Read it with offset and limit."
+
+
+# `cat file`, `type file`, `Get-Content file`: one file, nothing piped or redirected.
+SHELL_READ = re.compile(r"""^\s*(?:cat|type|less|more|gc|Get-Content)\s+(["']?)([^\s"'|;&<>]+)\1\s*$""", re.I)
+
+
+def shell_reads(event):
+    """Deny reason for dumping a lockfile, minified or huge file whole from the shell, else None."""
+    ti = event.get("tool_input") if isinstance(event, dict) else None
+    m = isinstance(ti, dict) and event.get("tool_name") in SHELLS and SHELL_READ.match(str(ti.get("command") or ""))
+    if not m:
+        return None
+    path = os.path.join(event.get("cwd") or os.getcwd(), os.path.expanduser(m.group(2)))
+    try:
+        reason = too_big(path, os.stat(path))
+    except (OSError, ValueError):
+        return None
+    return reason and reason + "Grep it for what you need, or print a slice (head, tail, sed -n)."
 
 
 def rereads(event):
@@ -766,7 +931,7 @@ def rereads(event):
 
 def pre_tool(event):
     """PreToolUse hook: the first deny reason from the switches that are on."""
-    for name, fn in (("secrets", secrets), ("reads", reads), ("reads", rereads)):
+    for name, fn in (("secrets", secrets), ("reads", reads), ("reads", shell_reads), ("reads", rereads)):
         reason = is_on(name) and fn(event)
         if reason:
             print(json.dumps({"hookSpecificOutput": {

@@ -75,7 +75,7 @@ Then tell the user to run /clear. The next session in this project starts with t
     ),
 }
 # saver.py subcommand each hook runs, and its matcher.
-HOOKS = {"SessionStart": ("startup|clear", "check"), "PostToolUse": ("Bash", "guard"),
+HOOKS = {"SessionStart": ("startup|clear", "check"), "PostToolUse": ("Bash|PowerShell|Grep|Glob|WebFetch|Agent|Task|mcp__.*", "guard"),
          "PreToolUse": ("Bash|PowerShell|Read|Grep|Glob|Write|Edit|MultiEdit", "secrets")}
 
 

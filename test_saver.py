@@ -42,6 +42,29 @@ assert (s["calls"], s["input"], s["output"]) == (1, 5, 100), s
 assert s["caveman"] and not s["ponytail"] and s["text"] == 100
 assert s["graph_queries"] == ["t1"] and s["graph_results"] == 200
 assert [r[0] for r in saver.saved_rows(s)] == ["caveman", "graphify"]
+# modes: credit only between the hook's marker and the stop phrase; a tool result quoting the marker does not count
+def reply(i, n):
+    return {"message": {"id": i, "role": "assistant", "content": [{"type": "text", "text": "a" * n}]}}
+win = [
+    {"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "g", "content": "CAVEMAN MODE ACTIVE"}]}},
+    reply("r1", 4000),  # before: off
+    {"attachment": {"type": "hook_additional_context", "content": ["CAVEMAN MODE ACTIVE. Say stop caveman to end"]}},
+    {"isMeta": True, "message": {"role": "user", "content": "skill body: off with stop caveman or normal mode"}},
+    reply("r2", 400),
+    {"attachment": {"type": "edited_text_file", "snippet": "PONYTAIL MODE ACTIVE"}},
+    {"message": {"role": "user", "content": "ok stop caveman"}},
+    reply("r3", 4000),  # after: off
+]
+wp = os.path.join(cwd.replace("proj", "projects"), saver.project_slug(cwd), "w.jsonl")
+os.makedirs(os.path.dirname(wp))
+with open(wp, "w") as f:
+    f.write("\n".join(json.dumps(x) for x in win))
+w = saver.session_stats(wp)
+assert w["caveman"] and not w["ponytail"] and w["cave_text"] == 100 and (w["on_replies"], w["off_replies"]) == (1, 2), w
+assert "not enough replies" in saver.measured_cut(cwd)
+saver.MEASURE_MIN = 1
+assert "100 tokens on vs 1.0k off, 90% shorter" in saver.measured_cut(cwd), saver.measured_cut(cwd)
+saver.MEASURE_MIN = 20
 # savings: big tool outputs listed with their command; model switches on the main thread counted
 big = [
     {"message": {"id": "a", "role": "assistant", "model": "claude-opus-5-5", "usage": {},
@@ -152,6 +175,11 @@ assert out_of(saver.guard, {"tool_input": {"command": "ls"}, "tool_response": {"
 hint = json.loads(out_of(saver.guard, {"tool_input": {"command": "npm test"}, "tool_response": {"stdout": "x" * 20000, "stderr": "y" * 20000}}))
 assert "`npm test` printed ~7.5k" in hint["hookSpecificOutput"]["additionalContext"], hint  # capped at 30000 chars
 assert out_of(saver.guard, {"tool_response": None}) == "" and out_of(saver.guard, []) == ""
+# guard on other tools: JSON results counted, hint per tool, nothing remembered for the startup check
+grep = json.loads(out_of(saver.guard, {"tool_name": "Grep", "tool_input": {"pattern": "TODO"}, "tool_response": {"content": "x" * 40000}}))
+assert "Grep `TODO` returned ~10.0k" in grep["hookSpecificOutput"]["additionalContext"] and "head_limit" in str(grep), grep
+assert "fewer fields" in out_of(saver.guard, {"tool_name": "mcp__notion__search", "tool_response": [{"text": "x" * 9000}]})
+assert out_of(saver.guard, {"tool_name": "Glob", "tool_response": {"filenames": ["a.py"]}}) == ""
 # secrets: .env reads denied, placeholders and .environment allowed; keys built by concatenation so this file stays writable
 def denied(tool, **ti):
     out = out_of(saver.pre_tool, {"tool_name": tool, "tool_input": ti})
@@ -171,6 +199,10 @@ for p, n in ((lock, 10), (big_file, 50000), (png, 50000)):
     open(p, "w").write("x" * n)
 assert "skipped ~12.5k tokens, a whole read of data.csv" in denied("Read", file_path=big_file)
 assert denied("Read", file_path=lock) and not denied("Read", file_path=big_file, limit=100) and not denied("Read", file_path=png)
+# same files from the shell: one plain file only; pipes and slices pass
+shell = lambda tool, cmd: out_of(saver.pre_tool, {"tool_name": tool, "cwd": home, "tool_input": {"command": cmd}})
+assert "head, tail" in shell("Bash", "cat data.csv") and shell("PowerShell", f'Get-Content "{lock}"')
+assert shell("Bash", "cat data.csv | head") == "" and shell("Bash", "cat small.py") == "" and shell("Bash", "cat shot.png") == ""
 # re-read guard: an unchanged repeat is denied once, the next try passes; an edit resets it
 small = os.path.join(home, "small.py")
 open(small, "w").write("y")
@@ -178,6 +210,30 @@ reread = lambda **ti: out_of(saver.pre_tool, {"tool_name": "Read", "session_id":
 assert reread() == "" and "unchanged since" in reread() and reread() == "" and reread(limit=5) == ""
 os.utime(small, (0, 0))
 assert reread() == ""
+# plugin listings: enabled plugins' skills and agents, hand-run ones skipped
+proot = os.path.join(home, "plugins", "cache", "pl")
+for rel, front in (("skills/a/SKILL.md", "name: a\ndescription: " + "d" * 400), ("agents/b.md", "name: b"),
+                   ("skills/c/SKILL.md", "name: c\ndisable-model-invocation: true")):
+    os.makedirs(os.path.dirname(os.path.join(proot, rel)), exist_ok=True)
+    open(os.path.join(proot, rel), "w").write(f"---\n{front}\n---\nbody")
+json.dump({"plugins": {"pl@m": [{"installPath": proot}], "off@m": [{"installPath": proot}]}},
+          open(os.path.join(home, "plugins", "installed_plugins.json"), "w"))
+pcwd = tempfile.mkdtemp()
+os.makedirs(os.path.join(pcwd, ".claude"))
+json.dump({"enabledPlugins": {"pl@m": True, "off@m": False}}, open(os.path.join(pcwd, ".claude", "settings.json"), "w"))
+assert saver.plugin_listings(pcwd) == [("pl", 2, 110)], saver.plugin_listings(pcwd)
+# hook_injections: SessionStart stdout and additionalContext, by first word; JSON stdout and other hooks' stdout skipped
+hooks = os.path.join(tempfile.mkdtemp(), "h.jsonl")
+with open(hooks, "w") as f:
+    for att in ({"type": "hook_success", "hookEvent": "SessionStart", "content": "PONYTAIL MODE ACTIVE " + "x" * 400},
+                {"type": "hook_success", "hookEvent": "SessionStart", "content": '{"hookSpecificOutput": {}}'},
+                {"type": "hook_success", "hookEvent": "PostToolUse", "content": "claude-saver: ignored"},
+                {"type": "hook_additional_context", "content": ["CAVEMAN MODE ACTIVE (caveman). Terse."]},
+                {"type": "hook_additional_context", "content": ["CAVEMAN MODE ACTIVE (caveman). Terse."]}):
+        f.write(json.dumps({"attachment": att}) + "\nnot json\n")
+inj = saver.hook_injections(hooks)
+assert set(inj) == {"ponytail", "caveman"} and inj["caveman"][1] == 2 and inj["ponytail"][0] > 100, inj
+assert saver.hook_injections(None) == {}
 # cmd_key: the command name and subcommand, without cd, flags, args in quotes or pipes
 assert [saver.cmd_key(c) for c in ("cd app && npm test -- --watch", "git log --oneline | head", "pytest", "echo 'x y'", "")] == \
        ["npm test", "git log", "pytest", "echo", ""]
@@ -219,7 +275,7 @@ assert st["env"] == {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70", "CLAUDE_CODE_SUBAG
 assert st["model"] == "opusplan" and len(st["hooks"]["SessionStart"]) == 1, st
 assert st["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith('saver.py" check')
 (guard_hook,) = st["hooks"]["PostToolUse"]
-assert guard_hook["matcher"] == "Bash" and guard_hook["hooks"][0]["command"].endswith('saver.py" guard'), st
+assert guard_hook["matcher"].startswith("Bash|PowerShell|Grep") and guard_hook["hooks"][0]["command"].endswith('saver.py" guard'), st
 (secrets_hook,) = st["hooks"]["PreToolUse"]
 assert "Write" in secrets_hook["matcher"] and secrets_hook["hooks"][0]["command"].endswith('saver.py" secrets'), st
 assert "model" not in install.apply_settings({}, [], "py", "/c/statusline.py")

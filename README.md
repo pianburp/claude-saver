@@ -43,7 +43,7 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [Auto-compact at 50%](#auto-compact) | Compacts at half the window instead of near full | Automatic |
 | [Deny rules](#deny-rules) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `.env`, `.env.local`, `.env.*.local` | Automatic |
 | [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Automatic |
-| [Output guard](#output-guard) | Tells Claude when a Bash output is 2k+ tokens, so it uses quiet flags next time. Remembers repeat offenders | Automatic |
+| [Output guard](#output-guard) | Tells Claude when a tool output is 2k+ tokens (Bash, Grep, Glob, WebFetch, subagents, MCP), so it asks for less next time. Remembers noisy commands | Automatic |
 | [Secret guard](#secret-guard) | Blocks reading `.env` files and writing hardcoded API keys | Automatic |
 | [Read guards](#read-guards) | Skips whole reads of lockfiles, minified and huge files, and re-reads of unchanged files | Automatic |
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
@@ -58,6 +58,9 @@ Restart Claude Code. A line starting with `✻` shows up under the prompt.
 | [graphify](https://github.com/safishamsi/graphify) | Claude queries a code graph instead of re-reading files | Opt-in (`--all`) |
 
 caveman, ponytail and graphify are third-party projects. claude-saver only installs them and measures them.
+They are not free. Their rules add ~1-2k tokens per session, and caveman adds a reminder to every prompt
+([`/token-audit`](#token-audit) shows the real cost). Ponytail's "smallest diff" rule can also skip edge cases. Turn ponytail on for tasks prone to overbuilding, and keep
+`/effort` at medium or higher so the reasoning still happens.
 
 ## Status line
 
@@ -145,13 +148,14 @@ When it does print, it's one line (~40 tokens) telling Claude to suggest `/token
 
 ### Output guard
 
-A `PostToolUse` hook on Bash runs `saver.py guard`. When a command prints 2k+ tokens, Claude gets one line (~40 tokens):
+A `PostToolUse` hook runs `saver.py guard` after Bash, PowerShell, Grep, Glob, WebFetch, Agent and MCP tools. When a command prints 2k+ tokens, Claude gets one line (~40 tokens):
 
 ```
 claude-saver: `npm test` printed ~7.5k tokens, re-sent on every later call. Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.
 ```
 
 The count stops at `BASH_MAX_OUTPUT_LENGTH` (30000 chars by default), the most Claude sees. Smaller outputs print nothing.
+Other tools get a hint of their own: `head_limit` for Grep, a narrower pattern for Glob, a shorter answer from a subagent, fewer fields from an MCP tool.
 
 Each warning is counted per project and command (`npm test`, `git log`) in `~/.claude/.statusline-ctx/noisy.json`.
 The [startup check](#startup-check) names the worst repeat offender, so the fix ends up in CLAUDE.md.
@@ -174,7 +178,9 @@ The same `PreToolUse` hook denies two kinds of `Read`. Claude gets a one-line re
 - **Re-reads**: the same file and range, unchanged since Claude read it this session. The first repeat is denied. The next try passes, in case compaction dropped the content.
   An edit changes the file, so read-after-edit is never blocked. State lives in `~/.claude/.statusline-ctx/<session>.reads`.
 
-Deny rules work by folder. These guards work by file. They cover the Read tool only, not `cat` in a shell. `/toggle reads off` turns both off.
+The whole-file check also covers the shell: `cat`, `type` or `Get-Content` of one such file, with no pipe or redirect. `cat x | head` passes.
+
+Deny rules work by folder. These guards work by file. Re-reads are checked for the Read tool only. `/toggle reads off` turns both off.
 
 ## On demand
 
@@ -186,6 +192,9 @@ Lists every file Claude Code loads each session (global and project CLAUDE.md, `
 - Files over 500 tokens, code blocks over 10 lines, stale paths, and lines repeated across files.
 - A MEMORY.md too long to load in full, and rules without `paths:` frontmatter (those load every session).
 - Project MCP servers (`.mcp.json`), unblocked heavy folders, and a `.claudeignore` (Claude Code doesn't read it).
+- Enabled plugins: how many skills and agents each lists to Claude on every call, and their token cost.
+- Hook text added to the last session (caveman and ponytail rules, claude-saver notes), per source, from the transcript.
+  It stays in history, so every later call re-reads it.
 - Subagents on your main model (and custom agents with no `model:`), no `## Compact instructions` section, and an unset `BASH_MAX_OUTPUT_LENGTH`.
 - A 5-minute prompt cache when `ENABLE_PROMPT_CACHING_1H` is off.
 
@@ -200,19 +209,25 @@ Session 9e1585f1: 13 API calls
   used     input 26 · cache write 45.2k · cache read 752.2k · output 18.0k
 
 Saved **estimated
-  caveman     ~2.5k output  65% avg cut on 1.4k reply tokens (caveman benchmark)
-  ponytail   ~15.7k output  80% fewer lines on 3.9k code tokens (ponytail benchmark, low end)
+  caveman     ~2.5k output  up to 65% cut on 1.4k reply tokens while on (caveman benchmark)
+  ponytail   ~15.7k output  up to 80% fewer lines on 3.9k code tokens while on (ponytail benchmark, low end)
   reads      ~12.9k input   2 reads blocked by deny rules or the read guards (folder denials at ~1.2k each)
   guard       ~2.9k input   noisy commands run again with less output
   total      ~34.0k
 
   prompt cache  752.2k input tokens billed at 10% (exact, built into Claude Code)
+  caveman       measured: replies avg 180 tokens on vs 420 off, 57% shorter (210/64 replies, last 30 sessions; tasks differ, so rough)
 ```
 
 `used` and `prompt cache` are exact, read from the session transcript. `Saved` rows are estimates:
 
-- **caveman:** reply tokens × the published 65% average cut.
-- **ponytail:** code tokens written × the published 80% low-end cut.
+- **caveman:** reply tokens written while caveman was on × the published 65% average cut.
+  It is an upper bound: a reply that drifted long still earns the full cut.
+  The `measured` line compares this project's average reply size with caveman on and off, from the last 30 sessions.
+  It needs 20 replies on each side; say `stop caveman` in a session to collect the off side.
+- **ponytail:** code tokens written while ponytail was on × the published 80% low-end cut. Also an upper bound.
+- **on / off:** a mode turns on at its hook's `MODE ACTIVE` marker and off when you type `stop caveman`, `stop ponytail` or `normal mode`.
+  A tool result or file that quotes the marker does not count.
 - **graphify:** assumes each graph query replaced 5 file reads of this session's average size.
   This is a guess. For a real number on your repo, run `graphify benchmark`.
 - **reads:** each read blocked by a [deny rule](#deny-rules) (at the session's average read size) or a [read guard](#read-guards) (at the file's size).
@@ -287,6 +302,9 @@ The tools can't do these for you:
 - `/clear` between unrelated tasks. Old context is re-sent on every call.
 - `/rewind` to undo a recent wrong turn instead of `/compact`. Everything before it stays cached.
 - Pick `/model` and `/effort` at the start. Changing them mid-session rebuilds the cache.
+  Editing CLAUDE.md, hooks, plugins or MCP servers mid-session can do the same. Make those changes between sessions.
+- Send broad searches ("where is X used", "map this folder") to a subagent. Its file reads stay out of your context,
+  and only the answer comes back.
 - @-mention files you know are relevant. It skips the search and Read calls.
 - Plan before you execute on anything non-trivial, and review the plan. Skip planning for one-line changes.
 - Put all constraints in the first prompt, and batch related changes into one request.
