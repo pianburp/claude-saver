@@ -3,56 +3,50 @@
 # claude-saver
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
 Spend fewer tokens in [Claude Code](https://claude.com/claude-code) without changing how you work.
 
 Every API call re-sends your CLAUDE.md, memory, tool schemas and the whole conversation.
 claude-saver trims what gets re-sent, shows you when it's about to get expensive,
-and tells you what each saver actually saved. Pure Python stdlib, one install command, no daemon.
+and tells you what each saver actually saved. One Claude Code [mod](#mod): nothing else to install, no daemon.
 
 In Claude Code:
 
 ```
 /plugin marketplace add pianburp/claude-saver
 /plugin install ctx-saver@pianburp
-/ctx-saver:setup
 ```
 
-`/ctx-saver:setup` finds a Python 3.8+ on your machine, lists every `settings.json` change and asks before writing.
-Add `--all` for the ponytail, caveman and graphify plugins: `/ctx-saver:setup --all`.
-After a plugin update, run `/ctx-saver:setup` again.
+The plugin is the mod: the status line, the guards, the startup check and every command.
+A line starting with `✻` shows up under the prompt. It updates with the plugin.
 
-Without the plugin, pipe the installer into Python (same flags):
+Then run `/saver-setup` once for the `settings.json` half: auto-compact at 50% and the `.env` deny rules.
+It lists every change; `/saver-setup --yes` writes them. Add `--all` for the ponytail, caveman and graphify plugins.
+Restart Claude Code after it writes.
 
-```sh
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/pianburp/claude-saver/main/install.py | python3 -
-# Windows (PowerShell). No `py` launcher? Use `python -` instead.
-irm https://raw.githubusercontent.com/pianburp/claude-saver/main/install.py | py -
-```
-
-Restart Claude Code. A line starting with `✻` shows up under the prompt.
+Upgrading from an older version? Run `/saver-setup --yes`. It removes the old status line and scripts
+(`statusline.py`, `saver.py`), and keeps your pet, ledger and switches. Until then the old line keeps drawing and the mod's stays hidden.
 
 ## What you get
 
-| Piece | What it does | When |
-|-------|--------------|------|
-| [Status line](#status-line) | Context, usage limits with a run-out forecast, prompt cache countdown. Hints `/compact` before auto-compact, `/handoff /clear` once the cache is cold | Always on |
-| [Auto-compact at 50%](#auto-compact) | Compacts at half the window instead of near full | Automatic |
-| [Deny rules](#deny-rules) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `.env`, `.env.local`, `.env.*.local` | Automatic |
-| [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Automatic |
-| [Output guard](#output-guard) | Tells Claude when a Bash output is 2k+ tokens, so it uses quiet flags next time. Remembers repeat offenders | Automatic |
-| [Secret guard](#secret-guard) | Blocks reading `.env` files and writing hardcoded API keys | Automatic |
-| [Read guards](#read-guards) | Skips whole reads of lockfiles, minified and huge files, and re-reads of unchanged files | Automatic |
-| [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | On demand |
-| [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | On demand |
-| [`/handoff`](#handoff) | Saves a task note before `/clear`; the next session starts with it | On demand |
-| [`/wrapped`](#wrapped) | Your week with Claude as a Wrapped-style page | On demand |
-| [`/toggle`](#toggle) | Turns the pet, the hooks and the read guards on or off mid-session | On demand |
-| [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | Opt-in |
-| [`--pet`](#pet) | A status line pet that eats the tokens you save | Opt-in |
+| Piece | What it does | Runs in | When |
+|-------|--------------|---------|------|
+| [Status line](#status-line) | Context, usage limits with a run-out forecast, prompt cache countdown. Hints `/compact` before auto-compact, `/handoff /clear` once the cache is cold | Mod | Always on |
+| [Auto-compact at 50%](#auto-compact) | Compacts at half the window instead of near full | settings | Automatic |
+| [Output trim](#output-trim) | Cuts a 2k+ token shell output to its head, error lines and tail before Claude reads it | Mod | Automatic |
+| [Folder guard](#folder-guard) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `dist`, `build` or `target`, not even through the shell | Mod | Automatic |
+| [Read guards](#read-guards) | Skips whole reads of lockfiles, minified and huge files (`cat big.log` too), and answers re-reads of unchanged files itself | Mod | Automatic |
+| [Secret guard](#secret-guard) | Blocks reading `.env` files and writing hardcoded API keys | Mod + settings | Automatic |
+| Focus mode | Hides tool calls and Claude's in-between text; a box above the prompt shows the task, its steps and what is left (kept after Esc), then the final summary. Claude's first edit or command in a task is refused once until it writes steps; when the session has no TaskCreate or TodoWrite, the mod adds its own `steps` tool. `ctrl+o` shows everything | Mod | Automatic |
+| [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Mod | Automatic |
+| [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | Mod | On demand |
+| [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | Mod, no model turn | On demand |
+| [`/handoff`](#handoff) | Saves a task note before `/clear`; the next session starts with it | Mod | On demand |
+| [`/wrapped`](#wrapped) | Your week with Claude as a Wrapped-style page | Mod, no model turn | On demand |
+| [`/toggle`](#toggle) | Turns the pet, the check and each guard on or off mid-session | Mod, no model turn | On demand |
+| [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | settings | Opt-in |
+| [Pet](#pet) | A status line pet that eats the tokens you save | Mod | Opt-in (`/toggle pet`) |
 | [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
 | [ponytail](https://github.com/DietrichGebert/ponytail) | Less code written: 80-94% fewer lines in its benchmark | Opt-in (`--with-plugins`, `--all`) |
 | [graphify](https://github.com/safishamsi/graphify) | Claude queries a code graph instead of re-reading files | Opt-in (`--all`) |
@@ -77,6 +71,7 @@ caveman, ponytail and graphify are third-party projects. claude-saver only insta
 - `/handoff /clear` replaces it once the cache has expired and context is over 20%. If you're switching tasks, starting fresh is cheaper. Run [`/handoff`](#handoff) first to keep the task.
 - Segments with no data are hidden.
 
+The mod draws it in place of the hint line under the prompt, and keeps the hint (`? for shortcuts`, `esc to interrupt`) as a dim row below it.
 It redraws every second. Animation follows the clock, so bursts of redraws don't speed it up:
 `✻` spins while Claude works, rising numbers count up over 3 seconds and glow peach for 15,
 and the cache timer pulses red in its last 5 minutes.
@@ -85,7 +80,7 @@ Only plain Unicode glyphs (`✻ ⎿ █ ░ · ●`) are used. No Nerd Font need
 
 ### Pet
 
-`/ctx-saver:setup --pet` puts Clawd, Claude Code's mascot, left of the status line, three rows tall as on Claude Code's welcome banner.
+`/toggle pet` (or `/saver-setup --yes --pet`) puts Clawd, Claude Code's mascot, left of the status line, three rows tall as on Claude Code's welcome banner.
 It eats the `saved` count from every session.
 It costs no tokens: the status line is never sent to the model.
 The status line credits each session's savings to `~/.claude/.statusline-ctx/ledger.json`, pet or not.
@@ -106,7 +101,7 @@ It glows when it grows. Its eyes, arms and color follow the session, first match
 
 It takes 11 columns, so the rest of the status line shifts right.
 
-`--uninstall` deletes `.statusline-ctx/`, pet included.
+`/saver-setup --yes --uninstall` deletes `.statusline-ctx/`, pet included.
 
 ## Automatic
 
@@ -116,65 +111,61 @@ Sets `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`. Long sessions drift, and every call r
 The variable is read by Claude Code but undocumented, so it may change. The documented alternative is
 `autoCompactWindow` (a token count). A value you already set is kept.
 
-### Deny rules
+### Mod
 
-Adds these to `permissions.deny` in `~/.claude/settings.json`, so they apply to every project:
+The plugin ships a [mod](https://claude.com/resources/articles/claude-code-mods), `hooks/register.tsx`, that runs inside Claude Code.
+A mod can block a tool call, rewrite its result before Claude reads it, or answer it outright, which a settings hook cannot.
+It also draws the status line and answers every command. Every guard below is the mod's. A guard that blocks gives Claude a one-line reason with the token cost and a cheaper path.
+`/toggle guard`, `/toggle secrets` and `/toggle reads` switch them off.
 
-```
-Read(**/node_modules/**)  Read(**/__pycache__/**)  Read(**/.venv/**)
-Read(**/venv/**)          Read(**/.next/**)        Read(**/coverage/**)
-Read(**/.env)             Read(**/.env.local)      Read(**/.env.*.local)
-```
+### Output trim
 
-The `.env` rules keep secrets out of the API. They name each file instead of using a wildcard, so `.env.example` stays readable.
-Deny rules cover Claude's file tools, not shell commands like `cat .env`.
-Your own rules are kept. To unblock one, delete its rule. Re-running the installer adds it back.
+A Bash or PowerShell output of 2k+ tokens is cut before Claude reads it: the first ~500 tokens, up to ~750 tokens of error lines
+(`error`, `fail`, `exception`, `traceback`, `panic`, `assert`) from the middle, and the last ~1k tokens.
+A note names the file with the full output (`~/.claude/.statusline-ctx/out/<n>.txt`, last 50 kept), and tells Claude to use quiet flags next time.
+The cut tokens are never sent, not even once. `/savings` shows them in a `trim` row.
 
-### Startup check
-
-A `SessionStart` hook (new sessions and `/clear`) runs `saver.py check`. It shows a [`/handoff`](#handoff) note if one is waiting.
-On new sessions it also checks the setup, and prints nothing unless something needs fixing:
-
-- An instruction file (CLAUDE.md, AGENTS.md, rules, MEMORY.md) is over 500 tokens, or MEMORY.md is past the 200 lines / 25KB that load.
-- A heavy folder isn't in `permissions.deny`: `dist`, `build`, `target`, the ones above, or any folder in the project's `.gitignore` with 1000+ files.
-- Project MCP servers (`.mcp.json`) are configured while `ENABLE_TOOL_SEARCH` is off, so every tool schema loads up front.
-- The [output guard](#output-guard) flagged the same command 3+ times in this project, and no always-loaded file mentions it:
-  `` `npm test` printed 2k+ tokens 6 times; add its quiet flag to CLAUDE.md ``. Writing that note silences it.
-
-When it does print, it's one line (~40 tokens) telling Claude to suggest `/token-audit`.
-
-### Output guard
-
-A `PostToolUse` hook on Bash runs `saver.py guard`. When a command prints 2k+ tokens, Claude gets one line (~40 tokens):
-
-```
-claude-saver: `npm test` printed ~7.5k tokens, re-sent on every later call. Next time use quiet flags (-q, --silent, --reporter=dot), pipe through tail or grep, or run it in a subagent.
-```
-
-The count stops at `BASH_MAX_OUTPUT_LENGTH` (30000 chars by default), the most Claude sees. Smaller outputs print nothing.
-
-Each warning is counted per project and command (`npm test`, `git log`) in `~/.claude/.statusline-ctx/noisy.json`.
+Each trim is counted per project and command (`npm test`, `git log`) in `~/.claude/.statusline-ctx/noisy.json`.
 The [startup check](#startup-check) names the worst repeat offender, so the fix ends up in CLAUDE.md.
 
-### Secret guard
+### Folder guard
 
-A `PreToolUse` hook runs `saver.py secrets`. It denies two things:
-
-- **Touching `.env` files** from Bash, PowerShell, Read, Grep or Glob (`.env`, `.env.local`, `.env.production.local`). A secret printed into the transcript can't be taken back. Deny rules on `Read()` alone miss `grep KEY .env` in a shell. `.env.example`, `.sample`, `.template` and `.dist` stay readable.
-- **Writes that hardcode a key**: a Write, Edit or MultiEdit containing an Anthropic, OpenAI, Stripe live, AWS, GitHub, Google or Slack key, or a private key block. Writes to `.env*` files are allowed, since that's where keys belong.
-
-It matches known key prefixes only, with no entropy scan. Bash heredocs are not scanned.
+`node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `dist`, `build` and `target` are blocked for Read, Grep, Glob
+and shell reads (`cat`, `ls`, `grep`, `find`, `Get-Content`, `Get-ChildItem` ...).
+Other commands pass, so `rm -rf node_modules` still runs, and so do exclusions like `--exclude-dir=node_modules`.
 
 ### Read guards
 
-The same `PreToolUse` hook denies two kinds of `Read`. Claude gets a one-line reason with the token cost and a cheaper path:
-
 - **Whole-file reads** of lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `Cargo.lock`, `uv.lock` ...), `*.min.js`, `*.min.css`, `*.map`, and any file over 40 KB (~10k tokens).
   A Read with `offset` or `limit` passes, and so do images and PDFs. Claude is told to Grep or read a slice.
-- **Re-reads**: the same file and range, unchanged since Claude read it this session. The first repeat is denied. The next try passes, in case compaction dropped the content.
-  An edit changes the file, so read-after-edit is never blocked. State lives in `~/.claude/.statusline-ctx/<session>.reads`.
+  A shell dump of a big file (`cat big.log`, `Get-Content big.log`, with no pipe or `-Tail`) is blocked the same way.
+- **Re-reads**: the same file and range, unchanged since Claude read it this session. The mod answers the call itself with Claude Code's
+  "file unchanged" result, without reading the file. The next try reads it, in case compaction dropped the content.
+  An edit changes the file, so read-after-edit always reads.
 
-Deny rules work by folder. These guards work by file. They cover the Read tool only, not `cat` in a shell. `/toggle reads off` turns both off.
+### Secret guard
+
+- **Touching `.env` files** from Bash, PowerShell, Read, Grep or Glob (`.env`, `.env.local`, `.env.production.local`). A secret printed into the transcript can't be taken back. `.env.example`, `.sample`, `.template` and `.dist` stay readable.
+- **Writes that hardcode a key**: a Write, Edit or MultiEdit containing an Anthropic, OpenAI, Stripe live, AWS, GitHub, Google or Slack key, or a private key block. Writes to `.env*` files are allowed, since that's where keys belong.
+
+It matches known key prefixes only, with no entropy scan. Bash heredocs are not scanned. If the guard itself fails, the call is refused.
+
+`/saver-setup` also adds `Read(**/.env)`, `Read(**/.env.local)` and `Read(**/.env.*.local)` to `permissions.deny`,
+so the Read tool stays blocked even where the mod is not loaded.
+
+### Startup check
+
+On new sessions and `/clear`, the mod runs its check. It shows a [`/handoff`](#handoff) note if one is waiting.
+On new sessions it also checks the setup, and prints nothing unless something needs fixing:
+
+- An instruction file (CLAUDE.md, AGENTS.md, rules, MEMORY.md) is over 500 tokens, or MEMORY.md is past the 200 lines / 25KB that load.
+- A folder in the project's `.gitignore` holds 1000+ files and neither the [folder guard](#folder-guard) nor `permissions.deny` blocks it.
+- Project MCP servers (`.mcp.json`) are configured while `ENABLE_TOOL_SEARCH` is off, so every tool schema loads up front.
+- The [output trim](#output-trim) cut the same command 3+ times in this project, and no always-loaded file mentions it:
+  `` `npm test` printed 2k+ tokens 6 times; add its quiet flag to CLAUDE.md ``. Writing that note silences it.
+- `settings.json` still holds an older version's `statusLine`: run `/saver-setup`.
+
+When it does print, it's one line (~40 tokens) telling Claude to suggest `/token-audit`.
 
 ## On demand
 
@@ -202,7 +193,7 @@ Session 9e1585f1: 13 API calls
 Saved **estimated
   caveman     ~2.5k output  65% avg cut on 1.4k reply tokens (caveman benchmark)
   ponytail   ~15.7k output  80% fewer lines on 3.9k code tokens (ponytail benchmark, low end)
-  reads      ~12.9k input   2 reads blocked by deny rules or the read guards (folder denials at ~1.2k each)
+  reads      ~12.9k input   2 reads blocked by the read guards or deny rules (folder blocks at ~1.2k each)
   guard       ~2.9k input   noisy commands run again with less output
   total      ~34.0k
 
@@ -215,8 +206,9 @@ Saved **estimated
 - **ponytail:** code tokens written × the published 80% low-end cut.
 - **graphify:** assumes each graph query replaced 5 file reads of this session's average size.
   This is a guess. For a real number on your repo, run `graphify benchmark`.
-- **reads:** each read blocked by a [deny rule](#deny-rules) (at the session's average read size) or a [read guard](#read-guards) (at the file's size).
-- **guard:** a 2k+ token command run again with less output, e.g. with the quiet flag the [output guard](#output-guard) suggested. The difference counts once.
+- **reads:** each call blocked by a [read guard](#read-guards) (at the file's size), or by the [folder guard](#folder-guard) or a deny rule of yours (at the session's average read size).
+- **trim:** the tokens the [output trim](#output-trim) cut.
+- **guard:** a 2k+ token command run again with less output, e.g. with the quiet flag the output trim suggested. The difference counts once.
 - **compact:** each auto-compact's dropped tokens × the calls after it, at the 10% cache-read price those calls would have paid.
   It credits all auto-compaction, not only the earlier trigger the 50% setting gives.
 
@@ -241,7 +233,7 @@ Only sessions with the status line running count.
 
 Run it before `/clear`. Claude writes a note of 15 lines or fewer: goal, what is done, the next step, key files, gotchas.
 It is saved to `~/.claude/.statusline-ctx/handoff/<project>.md`.
-The next session in that project (after `/clear` or a fresh start) gets the note from the [startup check](#startup-check) once, then the file is deleted.
+The next session in that project (after `/clear` or a fresh start) gets the note from the [startup check](#startup-check) once, then the file is emptied.
 Notes older than 7 days are dropped unread. It works with `/toggle check off` too.
 
 ### /wrapped
@@ -263,15 +255,16 @@ Turns a feature on or off without editing `settings.json` or restarting:
 ```
 Switches (take effect now, no restart):
   pet      on   Clawd on the status line
-  check    on   startup check (SessionStart hook)
-  guard    off  big-output guard (PostToolUse hook)
-  secrets  on   secret guard: blocks .env reads and hardcoded keys (PreToolUse hook)
-  reads    on   read guards: lockfiles, minified or huge whole-file reads, unchanged re-reads (PreToolUse hook)
+  check    on   startup check
+  guard    off  output trim: long shell outputs cut to head, errors and tail
+  secrets  on   secret guard: blocks .env access and hardcoded keys
+  reads    on   read guards: generated folders, lockfiles, huge files, unchanged re-reads
+  focus    on   focus mode: hide tool calls, show steps and what is left
 ```
 
 Switches live in `~/.claude/.statusline-ctx/config.json` and persist across sessions.
-The status line and the hooks read it on every run, so a change applies on the next redraw or tool call.
-A switch you set beats the installer's `--pet`.
+The mod reads it on every redraw and tool call, so a change applies at once.
+A switch you set beats an older install's `--pet`.
 caveman and ponytail have their own: `stop caveman` / `stop ponytail` for the session, `/plugin` to disable them everywhere.
 
 ## --orchestrate
@@ -295,64 +288,47 @@ The tools can't do these for you:
 
 ## Install
 
-Needs Python 3.8+. No packages.
+Install the plugin (top of this page). The status line, guards and commands need nothing else.
 
-- **macOS:** if `python3 --version` prompts for developer tools, run `xcode-select --install` (or `brew install python`).
-- **Linux:** install `python3` from your package manager.
-- **Windows:** install from [python.org](https://www.python.org/downloads/). It includes the `py` launcher.
-
-Use the one-liner at the top, or install from a clone:
-
-```sh
-git clone https://github.com/pianburp/claude-saver
-cd claude-saver
-python3 install.py          # Windows: py install.py
-```
-
-Flags (they combine, e.g. `--all --orchestrate`). With the one-liner, put them after the final `-`:
+`/saver-setup` handles `settings.json`. Without `--yes` it only lists the changes. Flags combine, e.g. `/saver-setup --yes --all --orchestrate`:
 
 | Flag | Adds |
 |------|------|
-| `--with-plugins` | ponytail and caveman, through the `claude` CLI. Without the CLI, the installer prints the `/plugin` commands to run |
+| `--with-plugins` | ponytail and caveman, through the `claude` CLI. Without the CLI, it prints the `/plugin` commands to run |
 | `--graphify` | graphify via `uv` (or `pip --user`), then `graphify install` |
 | `--all` | Both of the above |
 | `--orchestrate` | opusplan + Haiku subagents |
-| `--pet` | A [pet](#pet) left of the status line |
-| `--yes` | Applies the `settings.json` changes without asking. Use it in scripts |
-| `--uninstall` | Removes what the installer added (see below) |
+| `--pet` | Turns the [pet](#pet) on |
+| `--yes` | Applies the changes. Without it they are only listed |
+| `--uninstall` | Removes what setup added (see below) |
 
 New to Claude Code? Skip the plugins until you know the default behavior.
 caveman and ponytail change how Claude talks and codes in every project. Say `stop caveman` / `stop ponytail` to turn them off.
 graphify pays off in big repos: run `/graphify` once to build the graph. All three run third-party code, so read their repos first.
 
-What the installer touches:
+What `/saver-setup --yes` touches:
 
-1. Lists every `settings.json` change and asks `Apply? [Y/n]`. Answering no leaves every file as it was.
-   With no terminal to ask (output redirected), it applies them.
-2. Copies `statusline.py` and `saver.py` to `~/.claude/`.
-3. Writes the `/token-audit`, `/savings`, `/pet`, `/wrapped` and `/toggle` skills to `~/.claude/skills/` with `disable-model-invocation: true`.
-   They cost no tokens until you type them.
-4. Backs up `settings.json` and any existing `statusline.py` to `.bak`. This happens on the first run only, so the backup is never overwritten.
-5. Merges into `settings.json`: `statusLine`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, the deny rules, the startup hook, the output guard hook and the secret guard hook.
-   It keeps your values for everything except `statusLine` (and `model` with `--orchestrate`).
+1. Backs up `settings.json` to `settings.json.bak` on the first run only, so the backup is never overwritten.
+2. Merges into `settings.json`: `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and the three `.env` deny rules.
+   It keeps your values for everything except `model` with `--orchestrate`.
+3. Removes what older versions added and the mod now does: the old status line, its scripts and hooks, the folder deny rules, and the `/token-audit`, `/savings`, `/pet`, `/handoff`, `/wrapped` and `/toggle` skills they wrote.
+   Skills of your own with those names stay. An old `--pet` carries over to `/toggle pet`.
 
-**Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update), then `/ctx-saver:setup` with the same flags. Without the plugin, re-run the install command with the same flags. Plugins update through `/plugin` → **Marketplaces** (turn on auto-update).
+**Update:** `/plugin` → **Marketplaces** → `pianburp` (turn on auto-update). The status line updates with the plugin.
 
-**Uninstall:** `/ctx-saver:setup --uninstall`, then `/plugin uninstall ctx-saver@pianburp`. Without the plugin, run the install command with `--uninstall`.
+**Uninstall:** `/saver-setup --yes --uninstall`, then `/plugin uninstall ctx-saver@pianburp`.
 
-- It shows the `settings.json` changes and asks first, like the install does.
-- It removes `statusline.py`, `saver.py`, `.statusline-ctx/` (pet and ledger included) and the five skills from `~/.claude/`.
-- From `settings.json` it removes `statusLine`, the three hooks and the deny rules.
-  It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold the installer's values. Values you set yourself stay.
+- Run it without `--yes` first to see the `settings.json` changes.
+- It removes `.statusline-ctx/` (pet and ledger included) from `~/.claude/`, and any scripts an older version left.
+- From `settings.json` it removes the deny rules (and any status line or hooks an older version added).
+  It also removes `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_SUBAGENT_MODEL` and `model`, but only if they still hold setup's values. Values you set yourself stay.
 - The plugins stay. Remove them via `/plugin`, and graphify with `graphify uninstall`.
 
 ### Troubleshooting
 
-- **No status line:** copy `statusLine.command` from `~/.claude/settings.json` and run it as `echo {} | <command>`.
-  It should print a line starting with `✻`.
-- **`command not found` / `No such file`:** Python moved. Re-run the installer.
+- **No status line:** `settings.json` may still hold an older version's `statusLine`, which hides the mod's. Run `/saver-setup --yes`.
 - **`cave no plugin`:** caveman is installed as plain skills (e.g. `npx skills add`), which write no mode flag.
-  Re-run the installer with `--with-plugins`, then delete the `cave*` folders it lists from `~/.claude/skills/`.
+  Run `/saver-setup --yes --with-plugins`, then delete the `cave*` folders it lists from `~/.claude/skills/`.
 - **Boxes or `?` instead of `✻ ⎿ █ ▐▛`:** your font lacks the glyphs. Use Cascadia, Menlo, JetBrains Mono or DejaVu Sans Mono.
 
 ## Settings
@@ -361,21 +337,21 @@ What the installer touches:
 |----------|---------|--------|
 | `CLAUDE_CACHE_TTL` | detected | Prompt cache lifetime in seconds. Detected from the transcript's newest cache write (1h or 5m), `3600` until one exists. Set only to override. |
 | `NO_COLOR` | unset | Any value turns colors off. |
-| `COLORTERM` | set by terminal | `truecolor`/`24bit` gives a smooth glow fade. Otherwise it steps through 256 colors. |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` (installer) | Context % where Claude Code auto-compacts. The `/compact` hint shows 10 points earlier. |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` (setup) | Context % where Claude Code auto-compacts. The `/compact` hint shows 10 points earlier. |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | `haiku` (`--orchestrate`) | Model for subagents with no model of their own. |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where the installer, status line and saver look for config. |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Where the mod looks for config. |
 
 ## How it works
 
 | File | Role |
 |------|------|
-| `.claude-plugin/`, `skills/setup/` | Plugin manifest, marketplace and `/ctx-saver:setup`, which runs `install.py` from the plugin folder. |
-| `install.py` | Copies the scripts, writes the skills, merges `settings.json`. Works from a clone or piped from `curl`/`irm` (it fetches the other files from `main`). |
-| `statusline.py` | Reads Claude Code's status line JSON on stdin and prints two lines. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
-| `saver.py` | `audit`, `check`, `savings`, `pet`, `wrapped`, `guard`, `secrets` and `toggle`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. Writes only `wrapped.html` and the `/toggle` switches. |
-| `test_*.py` | Plain `assert` tests, no framework. |
-| `demo.py` | Plays the status line animations with fake data in a temp dir. Not installed. |
+| `.claude-plugin/` | Plugin manifest and marketplace. |
+| `hooks/register.tsx` | The [mod](#mod): every hook (guards, status line, focus mode, startup check, commands). The engine's `$` never crosses an import, so it hands the other files an `io` object (`hooks/io.ts`). |
+| `hooks/status.ts` | The status line and pet: gathers the session's figures each second and returns colored rows. Per-session glow state lives in `~/.claude/.statusline-ctx/`. |
+| `hooks/saver.ts` | `/token-audit`, the startup check, `/savings`, `/pet`, `/wrapped`, `/handoff` and `/toggle`. Reads instruction files, settings, session transcripts (`~/.claude/projects/*/*.jsonl`) and the ledger. |
+| `hooks/setup.ts` | `/saver-setup`: merges `settings.json`, removes what older versions installed. |
+| `hooks/focus.ts` | Focus mode's pure helpers. |
+| `hooks/*.test.ts` | Tests, run with `claude plugin test .`; `hooks/fakeio.ts` is their in-memory file system. |
 | `.github/workflows/upstream.yml` | Weekly job that fails if caveman, ponytail or graphify rename a flag file or marker that claude-saver reads. |
 
 Token counts are `chars / 4`, the same approximation graphify and most tools use. Exact numbers come only from transcript `usage` fields.
@@ -383,25 +359,19 @@ Token counts are `chars / 4`, the same approximation graphify and most tools use
 ## Development
 
 ```sh
-python3 test_saver.py && python3 test_statusline.py      # both print "ok"
-python3 demo.py                                          # watch every animation with fake data (15s)
-
-# try the status line with fake input
-echo '{"model":{"display_name":"Opus"},"context_window":{"used_percentage":42}}' | python3 statusline.py
-
-# run the saver against any repo
-cd ~/some/project && python3 /path/to/claude-saver/saver.py audit
+claude plugin validate . && claude plugin test .
+claude --plugin-dir .        # try the mod from a clone
 ```
 
 Ground rules for PRs:
 
-- **Stdlib only.** The installer is piped into `python3` on fresh machines.
-- **Silent by default.** Hook output lands in Claude's context on every session, so `check` prints only when there's something to fix.
-- **Never clobber user settings.** Use `setdefault`, keep existing values, back up once.
-- **Cite estimates.** Any savings number needs a source or a `# guess` comment.
-- **Add an assert.** New logic gets one check in the matching `test_*.py`.
+- **No dependencies.** The mod runs in Claude Code's own environment: no Node, no DOM.
+- **Silent by default.** Hook output lands in Claude's context on every session, so the check prints only when there's something to fix.
+- **Never clobber user settings.** Use `??=`, keep existing values, back up once.
+- **Cite estimates.** Any savings number needs a source or a `shortcut:` comment.
+- **Add a test.** New logic gets one check in the matching `hooks/*.test.ts`.
 
-Bug reports are most useful with your OS, Python version, and the output of `saver.py audit` or `echo {} | <statusLine command>`.
+Bug reports are most useful with your OS, Claude Code version, and the output of `/token-audit` or `/toggle`.
 
 ## Further reading
 

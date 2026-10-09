@@ -1,4 +1,4 @@
-# Weekly: fail if ponytail, caveman or graphify renamed something statusline.py or saver.py reads.
+# Weekly: fail if ponytail, caveman or graphify renamed something hooks/status.ts or hooks/saver.ts reads.
 # GitHub emails the repo owner when a scheduled run fails.
 name: upstream
 on:
@@ -19,10 +19,10 @@ jobs:
             grep -rqE --include=*.js --include=*.mjs --include=*.py --include=*.sh "$2" "$1" \
               || { echo "::error::$1 no longer contains: $2"; fail=1; }
           }
-          need ponytail '\.ponytail-active'           # statusline.py mode badge
-          need ponytail 'PONYTAIL MODE ACTIVE'        # saver.py session detection
-          need caveman '\.caveman-active'             # statusline.py mode badge
-          need caveman '\.caveman-sessions'           # statusline.py per-session mode
-          need caveman 'CAVEMAN MODE ACTIVE'          # saver.py session detection
-          need graphify 'cmd == "(query|path|explain)"'  # saver.py graph query count
+          need ponytail '\.ponytail-active'           # hooks/status.ts mode badge
+          need ponytail 'PONYTAIL MODE ACTIVE'        # hooks/saver.ts session detection
+          need caveman '\.caveman-active'             # hooks/status.ts mode badge
+          need caveman '\.caveman-sessions'           # hooks/status.ts per-session mode
+          need caveman 'CAVEMAN MODE ACTIVE'          # hooks/saver.ts session detection
+          need graphify 'cmd == "(query|path|explain)"'  # hooks/saver.ts graph query count
           exit $fail
