@@ -5,12 +5,14 @@ export type Step = { id: string; text: string; status: StepStatus; since?: numbe
  * The task the focus band shows: the prompt's first line, its steps, when it started and ended (ms), the last tool's
  * work, and whether the step gate already refused a change once.
  */
-export type Run = { title: string; endedAt: number | null; steps: Step[]; doing?: string; nudged?: boolean }
+export type Run = { title: string; endedAt: number | null; steps: Step[]; doing?: string; nudged?: boolean; agents?: Agent[] }
+/** A subagent the band shows: its id (tool.call's `agentId`), type, task, model, last tool's work, and whether it ended. */
+export type Agent = { id: string; type: string; label: string; model?: string; doing?: string; done?: boolean }
 /** One run of status line text in one color (hex); a row is the runs drawn side by side. */
 export type Seg = { text: string; color?: string; bold?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
-    'ctx-saver': { focus: boolean; run: Run | null; now: number; shown: number; answers: string[]; status: Seg[][] | null }
+    'ctx-saver': { focus: boolean; run: Run | null; now: number; shown: number; answers: string[] }
   }
 }

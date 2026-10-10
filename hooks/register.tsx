@@ -1,17 +1,19 @@
-// claude-saver's mod: every guard, the status line, the startup check and every command. The guards run in-process
-// and can rewrite a tool's result, which a settings hook cannot. saver.ts holds the commands' logic, status.ts the
-// status line's, setup.ts /saver-setup's. Focus mode (/toggle focus) hides tool rows and draws a step band.
+// claude-saver's mod: every guard, startup check and command. The guards run in-process, so they can answer a call
+// without running the tool and share state, which a settings hook cannot. saver.ts holds the commands' logic,
+// status.ts the status line's, setup.ts /saver-setup's. Focus mode (/toggle focus) hides tool rows and draws a step band.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Run, Step, StepStatus } from '../types'
-import { FOCUS_PROMPT, STEPS_SPEC, STEPS_TOOL, activity, isAnswer, parseSteps, stamp, stepFraction, stepLabel } from './focus'
+import type { Agent, Run, Step, StepStatus } from '../types'
+import {
+  FOCUS_PROMPT, STEPS_SPEC, STEPS_TOOL, activity, agentRows, isAnswer, parseSteps, routeModel, stamp, stepFraction, stepLabel,
+} from './focus'
 import {
   HEAVY, NOISY, audit, check, claudeDir, cmdKey, fmt, handoffPath, isOn, loadJson, newestTranscript, normcase, openFile,
-  pet, projectSlug, savings, toggle, week, wrapped,
+  ctxFile, pet, projectSlug, savings, toggle, week, wrapped,
 } from './saver'
 import { setup, USAGE } from './setup'
-import { BAR_WIDTH, CLAUDE, DARK, GRAY, GREEN, SPINNER, YELLOW, frame as statusFrame } from './status'
+import { BAR_WIDTH, CLAUDE, DARK, GRAY, GREEN, SPINNER, YELLOW, ansi, frame as statusFrame } from './status'
 import type { Session } from './status'
 import type { Io } from './io'
 
@@ -198,8 +200,6 @@ const focus = atom({ plugin: 'ctx-saver', key: 'focus' } as const, true)
 const run = atom({ plugin: 'ctx-saver', key: 'run' } as const, null)
 const now = atom({ plugin: 'ctx-saver', key: 'now' } as const, 0)
 const answers = atom({ plugin: 'ctx-saver', key: 'answers' } as const, [])
-// The status line's rows under the prompt; null while an older install's settings.json status line draws instead.
-const status = atom({ plugin: 'ctx-saver', key: 'status' } as const, null)
 const FRAME = 100 // ms between band frames while a turn runs
 const STATUS_FRAME = 1000 // ms between status line frames, as the old refreshInterval
 const KEEP_ANSWERS = 100
@@ -210,11 +210,12 @@ async function refreshFocus($: EngineInterface) {
   await update($, focus, () => isFocus)
 }
 
-/** One band frame: the clock moves. True once the turn ended, so frames can stop. */
+/** One band frame: the clock moves. True once the turn and its subagents ended, so frames can stop. */
 async function frame($: EngineInterface) {
   const t = await $.clock.now()
   await update($, now, () => t)
-  return (await read($, run))?.endedAt != null
+  const r = await read($, run)
+  return r?.endedAt != null && !r.agents?.some(a => !a.done)
 }
 
 type TextEl = ReturnType<EngineInterface['ui']['resolve']>['Text']
@@ -231,10 +232,16 @@ async function setSteps($: EngineInterface, fn: (steps: Step[]) => Step[]) {
     steps: stamp(r?.steps ?? [], fn(r?.steps ?? []), t) }) as Run)
 }
 
-// The status line's session (the transcript it reads and its glows; a new one on /clear) and the rows last drawn.
+/** Changes one subagent's band row; a call from an agent the band never saw spawn is left alone. */
+async function setAgent($: EngineInterface, id: string, fn: (a: Agent) => Agent) {
+  return update($, run, r => r && r.agents?.some(a => a.id === id)
+    ? { ...r, agents: r.agents.map(a => (a.id === id ? fn(a) : a)) } : r)
+}
+
+// The status line's session (the transcript it reads and its glows; a new one on /clear) and the file last drawn.
 const live: { sess: Session; drawn: string } = { sess: {}, drawn: 'null' }
 
-/** One status line frame; the atom is written only when a row changed, so an idle line costs no redraw. */
+/** One status line frame; the file is written only when rows change, so an idle line costs no redraw. */
 async function statusTickOnce($: EngineInterface) {
   const sess = live.sess
   if (!sess.id) {
@@ -245,7 +252,11 @@ async function statusTickOnce($: EngineInterface) {
   const json = JSON.stringify(rows)
   if (json !== live.drawn) {
     live.drawn = json
-    await update($, status, () => rows)
+    if (sess.id) {
+      // shortcut: line/*.txt files are never pruned; prune on session start if the folder grows.
+      await $.fs.write(await ctxFile(io($), 'line', `${sess.id}.txt`),
+        ansi(rows ?? [], Boolean(await $.env.get('NO_COLOR'))))
+    }
   }
 }
 
@@ -400,6 +411,11 @@ export const register: Register = on => {
   // With no steps written, the band names the last tool's work instead of a stuck "planning". It is also the step
   // gate: a task's first change waits for a step list, refused once per task so Claude is never stuck.
   on('tool.call', async ($, e, next) => {
+    // A subagent's call names its own row's work; the step gate is for the main conversation only.
+    if (e.agentId) {
+      await setAgent($, e.agentId, a => ({ ...a, doing: activity(e.tool, e) }))
+      return next(e)
+    }
     await update($, run, r => (r && r.endedAt === null ? { ...r, doing: activity(e.tool, e) } : r))
     const r = await read($, run)
     if (!r || r.endedAt !== null || r.steps.length || r.nudged || !changes(String(e.tool), e as unknown as Input)
@@ -409,19 +425,32 @@ export const register: Register = on => {
       'then make this change again.' }
   })
 
+  // A subagent starting: /toggle route picks its model, and the band gets a row for it.
+  on('agent.spawn', async ($, e, next) => {
+    const model = (await isOn(io($), 'route')) ? routeModel(e.subagentType, e.model) : undefined
+    const ran = await next(model ? { ...e, model } : e)
+    const id = ran.agentId
+    if (id) await update($, run, r => r && { ...r, agents: [...(r.agents ?? []),
+      { id, type: e.subagentType, label: e.description, model: ran.model }] })
+    return ran
+  })
+
   on('turn.complete', async ($, e, next) => {
     const ran = await next(e)
-    if (e.agentId) return ran
+    if (e.agentId) {
+      await setAgent($, e.agentId, a => ({ ...a, done: true }))
+      return ran
+    }
     const t = await $.clock.now()
     await update($, run, r => r && { ...r, endedAt: t })
     if (e.answer.trim()) await update($, answers, a => [...a, e.answer].slice(-KEEP_ANSWERS))
     return ran
   })
 
-  // shortcut: a subagent's TodoWrite also lands here (tool.call carries no agent id); the prompt asks subagents not to.
+  // The band shows the main conversation's steps: a subagent's step list is its own business.
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     const ran = await next(e)
-    if (!ran.isError && ran.deny === undefined)
+    if (!e.agentId && !ran.isError && ran.deny === undefined)
       await setSteps($, () => e.todos.map((t, i) => ({ id: String(i), text: t.content, status: t.status })))
     return ran
   })
@@ -429,13 +458,13 @@ export const register: Register = on => {
   on('tool.call', { tool: 'TaskCreate' }, async ($, e, next) => {
     const ran = await next(e)
     const id = (ran.result as { task?: { id?: string } } | undefined)?.task?.id
-    if (id) await setSteps($, s => [...s, { id, text: e.subject, status: 'pending' }])
+    if (id && !e.agentId) await setSteps($, s => [...s, { id, text: e.subject, status: 'pending' }])
     return ran
   })
 
   on('tool.call', { tool: 'TaskUpdate' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.isError || ran.deny !== undefined) return ran
+    if (e.agentId || ran.isError || ran.deny !== undefined) return ran
     await setSteps($, s => e.status === 'deleted' ? s.filter(x => x.id !== e.taskId) : s.map(x => x.id !== e.taskId ? x
       : { ...x, text: e.subject ?? x.text, status: (e.status as StepStatus | undefined) ?? x.status }))
     return ran
@@ -444,7 +473,7 @@ export const register: Register = on => {
   on('tool.call', { tool: STEPS_TOOL }, async ($, e) => {
     const steps = parseSteps(e)
     if (!steps) return { deny: 'steps: send { steps: [{ text, status }] }, status pending, in_progress or completed.' }
-    await setSteps($, () => steps)
+    if (!e.agentId) await setSteps($, () => steps)
     return { result: `Showing ${steps.length} steps to the user.` }
   })
 
@@ -468,26 +497,6 @@ export const register: Register = on => {
     return <Box display="none" />
   })
 
-  // The status line (and Clawd, when on) in the hint line's place under the prompt; the engine's hint stays below it.
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    const rows = await read($, status)
-    if (!rows?.length) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    const noColor = Boolean(await $.env.get('NO_COLOR'))
-    return (
-      <Box flexDirection="column">
-        {rows.map((row, i) => (
-          <Box key={`status-${i}`}>
-            <Text wrap="truncate-end">
-              {row.map((s, j) => <Text key={String(j)} color={noColor ? undefined : s.color} bold={s.bold}>{s.text}</Text>)}
-            </Text>
-          </Box>
-        ))}
-        {e.props.hint ? <Text dimColor wrap="truncate-end">{e.props.hint}</Text> : null}
-      </Box>
-    )
-  })
-
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const r = await read($, run)
     if (e.props.hasSurvey || !r?.title || !(await read($, focus))) return next(e)
@@ -503,10 +512,13 @@ export const register: Register = on => {
     const finished = ended && done === total
     const spin = SPINNER[Math.floor(t / FRAME) % SPINNER.length]
     const current = r.steps.findIndex(s => s.status === 'in_progress')
+    const running = (r.agents ?? []).filter(a => !a.done).length
+    const agents = agentRows(r.agents ?? [])
     // No "done": Claude's own line already says it. No steps leaves just the ✓ and the task.
     const status = finished ? (total ? `${done} of ${total} steps` : '')
       : ended ? `stopped at ${done} of ${total}`
-      : total ? `step ${current >= 0 ? current + 1 : Math.min(done + 1, total)} of ${total}` : r.doing ?? 'planning'
+      : total ? `step ${current >= 0 ? current + 1 : Math.min(done + 1, total)} of ${total}`
+      : running ? `${running} agent${running > 1 ? 's' : ''} running` : r.doing ?? 'planning'
     const textW = Math.min(44, Math.max(10, ...r.steps.map(s => s.text.length + 1)))
     const sep = <Text color={DARK}> · </Text>
 
@@ -531,6 +543,20 @@ export const register: Register = on => {
             </Box>
           )
         })}
+        {/* Subagents, one row each: type · task · what it does now; ✓ once its turn ended */}
+        {finished && !running ? null : agents.rows.map(a => (
+          <Box key={a.id}>
+            <Text color={DARK}>{'  ⤷ '}</Text>
+            <Text color={a.done ? GREEN : CLAUDE}>{a.done ? '✓' : spin} </Text>
+            <Box flexShrink={1}>
+              <Text color={a.done ? GRAY : undefined} wrap="truncate-end">
+                {a.type}<Text color={DARK}> · </Text>{a.label}
+                {!a.done && a.doing ? <Text color={GRAY}> · {a.doing}</Text> : null}
+              </Text>
+            </Box>
+          </Box>
+        ))}
+        {(!finished || running) && agents.more ? <Text color={GRAY}>{`    +${agents.more} more`}</Text> : null}
       </Box>
     )
   })

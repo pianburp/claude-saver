@@ -3,7 +3,6 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import { STEPS_TOOL } from './focus'
-import { changes } from './register'
 
 const TODOS = [
   { content: 'Pick the page style', status: 'completed', activeForm: 'Picking' },
@@ -149,12 +148,83 @@ test('focus registers its steps tool only when the session has no task tool', as
   expect(registered).toEqual(['steps'])
 })
 
-test('changes: edits and non-read commands, not reads', () => {
-  expect(changes('Edit', {})).toBe(true)
-  expect(changes('Bash', { command: 'npm test' })).toBe(true)
-  expect(changes('Bash', { command: 'cd app && ls | grep x' })).toBe(false)
-  expect(changes('PowerShell', { command: 'Get-ChildItem src' })).toBe(false)
-  expect(changes('Read', { file_path: 'a.ts' })).toBe(false)
+const SPAWN = { tool_use_id: 'u9', prompt: 'p', description: 'Find the focus code', subagentType: 'Explore',
+  provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false } as never
+
+test('subagents get band rows and never touch the main steps or the step gate', async ($, on) => {
+  quiet(on)
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'inherit', agentId: 'a1' }))
+  on('tool.call', { tool: 'TodoWrite' }, () => ({ result: { oldTodos: [], newTodos: [] } }))
+  on('tool.call', { tool: /^(Read|Edit)$/ }, () => ({ result: {} }))
+  await $.turn.start({ text: 'Map the code', turnId: 't1' })
+  await $.tool.call({ tool: 'TodoWrite', todos: [...TODOS] })
+  await $.agent.spawn(SPAWN)
+
+  // The subagent's own list, read and edit: its row changes, the main steps and gate do not.
+  await $.tool.call({ tool: 'TodoWrite', agentId: 'a1', todos: [{ content: 'Sub step', status: 'in_progress', activeForm: 'x' }] } as never)
+  await $.tool.call({ tool: STEPS_TOOL, agentId: 'a1', steps: [{ text: 'Sub tool step', status: 'in_progress' }] } as never)
+  await $.tool.call({ tool: 'Read', agentId: 'a1', file_path: 'C:\\app\\focus.ts' } as never)
+  let ui = await band($)
+  expect(await ui.find({ text: 'step 2 of 4' })).toBeDefined()
+  expect(await ui.find({ text: /Sub/ })).toBeUndefined()
+  expect(await ui.find({ text: /Explore/ })).toBeDefined()
+  expect(await ui.find({ text: /Find the focus code/ })).toBeDefined()
+  expect(await ui.find({ text: /reading focus\.ts/ })).toBeDefined()
+
+  await $.turn.complete({ answer: 'found', durationMs: 1, isAborted: false, turnId: 's1', reason: 'answer', agentId: 'a1' } as never)
+  ui = await band($)
+  expect(await ui.find({ text: '✓ ' })).toBeDefined()
+  expect(await ui.find({ text: /reading/ })).toBeUndefined()
+})
+
+test('a subagent edit before main steps is not refused', async ($, on) => {
+  quiet(on)
+  on('agent.spawn', () => ({ model: 'inherit', agentId: 'a1' }))
+  on('tool.call', { tool: 'Edit' }, () => ({ result: {} }))
+  await $.turn.start({ text: 'Fix it', turnId: 't1' })
+  await $.agent.spawn(SPAWN)
+  const ran = await $.tool.call({ tool: 'Edit', agentId: 'a1', file_path: 'a.ts', old_string: 'a', new_string: 'b' } as never)
+  expect(ran.deny).toBeUndefined()
+  expect(await (await band($)).find({ text: '1 agent running' })).toBeDefined()
+})
+
+test('/toggle route: off by default, read-only types to Haiku when on', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  let cfg = '{}'
+  on('fs.read', (_$, e) => (e.path.endsWith('config.json') ? { value: cfg } : { deny: 'ENOENT' }))
+  mock.clock(on)
+  const asked: (string | undefined)[] = []
+  on('agent.spawn', (_$, e) => { asked.push(e.model); return { model: e.model ?? 'inherit', agentId: 'a' } })
+  await $.agent.spawn(SPAWN)
+  cfg = '{"route": true}'
+  await $.agent.spawn(SPAWN)
+  await $.agent.spawn({ ...(SPAWN as object), subagentType: 'general-purpose' } as never)
+  await $.agent.spawn({ ...(SPAWN as object), model: 'sonnet' } as never)
+  await $.agent.spawn({ ...(SPAWN as object), subagentType: 'caveman:cavecrew-investigator' } as never)
+  await $.agent.spawn({ ...(SPAWN as object), model: 'opus' } as never) // an explicit model is kept
+  expect(asked).toEqual([undefined, 'haiku', undefined, 'sonnet', 'haiku', 'opus'])
+})
+
+test('more than four subagents: the band draws four and counts the rest', async ($, on) => {
+  quiet(on)
+  let n = 0
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'inherit', agentId: `a${n++}` }))
+  await $.turn.start({ text: 'Map the code', turnId: 't1' })
+  for (let i = 0; i < 6; i++) await $.agent.spawn({ ...(SPAWN as object), tool_use_id: `u${i}`, description: `Task ${i}` } as never)
+  const ui = await band($)
+  expect(await ui.find({ text: /\+2 more/ })).toBeDefined()
+  expect(await ui.find({ text: /Task 3/ })).toBeDefined()
+  expect(await ui.find({ text: /Task 4/ })).toBeUndefined()
+})
+
+test('the step gate lets reads through and refuses a shell write, as it refuses an edit', async ($, on) => {
+  quiet(on)
+  on('tool.call', { tool: /^(Bash|PowerShell|Read)$/ }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  await $.turn.start({ text: 'Look around', turnId: 't1' })
+  expect((await $.tool.call({ tool: 'Bash', command: 'cd app && ls | grep x' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'PowerShell', command: 'Get-ChildItem src' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Read', file_path: 'a.ts' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Bash', command: 'npm test' })).deny).toContain('write your steps first')
 })
 
 test('/toggle focus off shows the tool rows again', async ($, on) => {

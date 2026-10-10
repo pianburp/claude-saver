@@ -3,6 +3,7 @@
 # claude-saver
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Claude Code: v2.1.287+](https://img.shields.io/badge/Claude_Code-v2.1.287%2B-brightblue.svg)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen.svg)
 
 Spend fewer tokens in [Claude Code](https://claude.com/claude-code) without changing how you work.
@@ -22,7 +23,7 @@ The plugin is the mod: the status line, the guards, the startup check and every 
 A line starting with `✻` shows up under the prompt. It updates with the plugin.
 
 Then run `/saver-setup` once for the `settings.json` half: auto-compact at 50% and the `.env` deny rules.
-It lists every change; `/saver-setup --yes` writes them. Add `--all` for the ponytail, caveman and graphify plugins.
+It lists every change; `/saver-setup --yes` writes them and sets the full-width `statusLine`. Existing installs must re-run it. Add `--all` for the ponytail, caveman and graphify plugins.
 Restart Claude Code after it writes.
 
 Upgrading from an older version? Run `/saver-setup --yes`. It removes the old status line and scripts
@@ -38,14 +39,14 @@ Upgrading from an older version? Run `/saver-setup --yes`. It removes the old st
 | [Folder guard](#folder-guard) | Claude never reads `node_modules`, `__pycache__`, `.venv`, `venv`, `.next`, `coverage`, `dist`, `build` or `target`, not even through the shell | Mod | Automatic |
 | [Read guards](#read-guards) | Skips whole reads of lockfiles, minified and huge files (`cat big.log` too), and answers re-reads of unchanged files itself | Mod | Automatic |
 | [Secret guard](#secret-guard) | Blocks reading `.env` files and writing hardcoded API keys | Mod + settings | Automatic |
-| Focus mode | Hides tool calls and Claude's in-between text; a box above the prompt shows the task, its steps and what is left (kept after Esc), then the final summary. Claude's first edit or command in a task is refused once until it writes steps; when the session has no TaskCreate or TodoWrite, the mod adds its own `steps` tool. `ctrl+o` shows everything | Mod | Automatic |
+| [Focus mode](#focus-mode) | Hides tool calls and Claude's in-between text; a box above the prompt shows the task, its steps and what is left (kept after Esc), then the final summary. Subagents get a row each: type, task and what they are doing now, ✓ when done. Claude's first edit or command in a task is refused once until it writes steps; when the session has no TaskCreate or TodoWrite, the mod adds its own `steps` tool. `ctrl+o` shows everything | Mod | Automatic |
 | [Startup check](#startup-check) | One line when something wastes tokens every session. Silent otherwise | Mod | Automatic |
 | [`/token-audit`](#token-audit) | Finds what loads before you type, proposes cuts as diffs | Mod | On demand |
 | [`/savings`](#savings) | This session's tokens and what each saver saved. `--week`: per day | Mod, no model turn | On demand |
 | [`/handoff`](#handoff) | Saves a task note before `/clear`; the next session starts with it | Mod | On demand |
 | [`/wrapped`](#wrapped) | Your week with Claude as a Wrapped-style page | Mod, no model turn | On demand |
-| [`/toggle`](#toggle) | Turns the pet, the check and each guard on or off mid-session | Mod, no model turn | On demand |
-| [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, subagents on Haiku | settings | Opt-in |
+| [`/toggle`](#toggle) | Turns the pet, the check, each guard, focus mode and subagent routing on or off mid-session | Mod, no model turn | On demand |
+| [`--orchestrate`](#--orchestrate) | Plans on Opus, executes on Sonnet, read-only subagents on Haiku | settings + mod | Opt-in |
 | [Pet](#pet) | A status line pet that eats the tokens you save | Mod | Opt-in (`/toggle pet`) |
 | [caveman](https://github.com/JuliusBrussee/caveman) | Shorter replies: 65% fewer output tokens on average | Opt-in (`--with-plugins`, `--all`) |
 | [ponytail](https://github.com/DietrichGebert/ponytail) | Less code written: 80-94% fewer lines in its benchmark | Opt-in (`--with-plugins`, `--all`) |
@@ -114,8 +115,9 @@ The variable is read by Claude Code but undocumented, so it may change. The docu
 ### Mod
 
 The plugin ships a [mod](https://claude.com/resources/articles/claude-code-mods), `hooks/register.tsx`, that runs inside Claude Code.
-A mod can block a tool call, rewrite its result before Claude reads it, or answer it outright, which a settings hook cannot.
-It also draws the status line and answers every command. Every guard below is the mod's. A guard that blocks gives Claude a one-line reason with the token cost and a cheaper path.
+Unlike a settings hook, a mod runs in Claude Code's own process: it can answer a tool call without running the tool,
+keep state across hooks, draw in the interface and run a command with no Claude turn.
+It draws the status line and answers every command. Every guard below is the mod's. A guard that blocks gives Claude a one-line reason with the token cost and a cheaper path.
 `/toggle guard`, `/toggle secrets` and `/toggle reads` switch them off.
 
 ### Output trim
@@ -166,6 +168,32 @@ On new sessions it also checks the setup, and prints nothing unless something ne
 - `settings.json` still holds an older version's `statusLine`: run `/saver-setup`.
 
 When it does print, it's one line (~40 tokens) telling Claude to suggest `/token-audit`.
+
+### Focus mode
+
+The transcript keeps only your prompts and Claude's final answers. The box above the prompt shows the work.
+Here's a task where Claude starts two subagents, drawn as the box looks at each stage:
+
+```
+› Find why the dashboard shows stale weather and fix it
+
+⎿ Find why the dashboard shows stale weather and fix it · 2 agents running      ← no steps yet
+  ⤷ ⠋ Explore · Find where the page fetches weather · reading api.ts
+  ⤷ ⠋ Explore · Find the cache settings · searching
+
+⎿ Find why the dashboard shows stale weather and fix it · step 2 of 3           ← Claude wrote its steps
+  ⎿ ✓ Find where the weather comes from
+    ⠋ Fix the cache time                ███░░░ 48%
+    ○ Check the page shows fresh data
+  ⤷ ✓ Explore · Find where the page fetches weather
+  ⤷ ✓ Explore · Find the cache settings
+
+✓ Find why the dashboard shows stale weather and fix it · 3 of 3 steps         ← done: one line stays
+```
+
+- A subagent's row shows its type, its task and its latest tool call, then `✓` when it ends. Its own step list stays out of the box.
+- With `/toggle route on`, the two `Explore` agents above run on Haiku while Claude keeps its model.
+- `Esc` mid-task keeps the steps left, marked `■ stopped at 1 of 3`. `ctrl+o` shows every tool call.
 
 ## On demand
 
@@ -260,6 +288,7 @@ Switches (take effect now, no restart):
   secrets  on   secret guard: blocks .env access and hardcoded keys
   reads    on   read guards: generated folders, lockfiles, huge files, unchanged re-reads
   focus    on   focus mode: hide tool calls, show steps and what is left
+  route    off  subagent models: read-only subagents (Explore and the like) on Haiku
 ```
 
 Switches live in `~/.claude/.statusline-ctx/config.json` and persist across sessions.
@@ -270,7 +299,9 @@ caveman and ponytail have their own: `stop caveman` / `stop ponytail` for the se
 ## --orchestrate
 
 Sets `"model": "opusplan"`: Opus in plan mode (Shift+Tab twice), Sonnet once you execute.
-Also sets `CLAUDE_CODE_SUBAGENT_MODEL=haiku` for subagents with no model of their own.
+Also turns on `/toggle route`: the mod starts read-only subagents (`Explore`, `claude-code-guide`, `statusline-setup`,
+`*-investigator`, `*-explore`) on Haiku. Builders and `general-purpose` keep your model, and an agent that names its own model keeps it.
+`route` is off by default and works without `--orchestrate` too.
 It's not part of `--all`, because it replaces your default model. Switch back any time with `/model`.
 
 ## Habits
@@ -297,7 +328,7 @@ Install the plugin (top of this page). The status line, guards and commands need
 | `--with-plugins` | ponytail and caveman, through the `claude` CLI. Without the CLI, it prints the `/plugin` commands to run |
 | `--graphify` | graphify via `uv` (or `pip --user`), then `graphify install` |
 | `--all` | Both of the above |
-| `--orchestrate` | opusplan + Haiku subagents |
+| `--orchestrate` | opusplan + `/toggle route` on |
 | `--pet` | Turns the [pet](#pet) on |
 | `--yes` | Applies the changes. Without it they are only listed |
 | `--uninstall` | Removes what setup added (see below) |
@@ -338,7 +369,7 @@ What `/saver-setup --yes` touches:
 | `CLAUDE_CACHE_TTL` | detected | Prompt cache lifetime in seconds. Detected from the transcript's newest cache write (1h or 5m), `3600` until one exists. Set only to override. |
 | `NO_COLOR` | unset | Any value turns colors off. |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `50` (setup) | Context % where Claude Code auto-compacts. The `/compact` hint shows 10 points earlier. |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | `haiku` (`--orchestrate`) | Model for subagents with no model of their own. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | unset | Model for subagents with no model of their own. Puts every such subagent on it, builders too; `/toggle route` picks by type instead. Older `--orchestrate` set it to `haiku`; `--uninstall` removes that. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Where the mod looks for config. |
 
 ## How it works

@@ -1,80 +1,105 @@
-import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { fakeIo } from './fakeio'
-import { DENY_READS, applySettings, changes, conflicts, removeSettings, setup } from './setup'
+import { disk } from './fakeio'
 
+type On = Parameters<typeof mock.env>[0]
+
+const SETTINGS = '/h/.claude/settings.json'
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v))
 
-test('applySettings keeps the user\'s values and adds only what was asked', () => {
-  const st = applySettings({ env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '70' } }, ['--orchestrate'])
-  expect(st.env).toEqual({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '70', CLAUDE_CODE_SUBAGENT_MODEL: 'haiku' })
-  expect(st.model).toBe('opusplan')
-  expect('statusLine' in st).toBe(false)
-  expect('model' in applySettings({}, [])).toBe(false)
-  expect(applySettings({}, ['--all']).enabledPlugins).toEqual({ 'ponytail@ponytail': true, 'caveman@caveman': true })
-  expect('enabledPlugins' in applySettings({}, [])).toBe(false)
+/** Home /h with these files; /saver-setup runs through the mod's command hook, as Claude would run it. */
+function world(on: On, files: Record<string, string>) {
+  mock.env(on, { HOME: '/h' })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5, 12) })
+  const d = disk(on, files, () => clock.now())
+  on('session.cwd', () => ({ value: '/proj' }))
+  return d
+}
+const saverSetup = ($: Engine, args: string) => $.command.run({ command: 'saver-setup', args } as never).then(r => r.text!)
+
+test('/saver-setup lists the settings it would change; the user\'s own values stay out of the list', async ($, on) => {
+  world(on, { [SETTINGS]: JSON.stringify({ env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '70' } }) })
+  const listed = await saverSetup($, '--orchestrate')
+  expect(listed).toContain('+ model: "opusplan"')
+  expect(listed).toContain('+ statusLine.refreshInterval: 1')
+  expect(listed).not.toContain('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE')
+  expect(listed).toContain('Run /saver-setup --yes --orchestrate to apply.')
+  expect(await saverSetup($, '')).not.toContain('opusplan')
 })
 
-test('an older install\'s status line, folder deny rules and saver.py hooks are dropped; the user\'s own stay', () => {
-  const old = {
-    statusLine: { type: 'command', command: '"py" "/c/statusline.py" --pet' },
-    permissions: { deny: ['Read(**/node_modules/**)', 'Bash(rm:*)'] },
-    hooks: {
-      SessionStart: [{ matcher: 'startup|clear', hooks: [{ command: 'py "/c/saver.py" check' }, { command: 'mine.sh' }] }],
-      PostToolUse: [{ matcher: 'Bash', hooks: [{ command: 'py "/c/saver.py" guard' }] }],
-      PreToolUse: [{ matcher: 'Read', hooks: [{ command: 'py "/c/saver.py" secrets' }] }],
-    },
-  }
-  const st = applySettings(old, [])
-  expect('statusLine' in st).toBe(false)
-  expect(st.permissions.deny).toEqual(['Bash(rm:*)', ...DENY_READS])
-  expect(st.hooks).toEqual({ SessionStart: [{ matcher: 'startup|clear', hooks: [{ command: 'mine.sh' }] }] })
-  expect(applySettings({ statusLine: { command: 'my-line.sh' } }, []).statusLine).toEqual({ command: 'my-line.sh' })
+test('an older install\'s status line, folder deny rules and saver.py hooks are dropped; the user\'s own stay', async ($, on) => {
+  const d = world(on, {
+    [SETTINGS]: JSON.stringify({
+      statusLine: { type: 'command', command: '"py" "/c/statusline.py" --pet' },
+      permissions: { deny: ['Read(**/node_modules/**)', 'Bash(rm:*)'] },
+      hooks: {
+        SessionStart: [{ matcher: 'startup|clear', hooks: [{ command: 'py "/c/saver.py" check' }, { command: 'mine.sh' }] }],
+        PostToolUse: [{ matcher: 'Bash', hooks: [{ command: 'py "/c/saver.py" guard' }] }],
+        PreToolUse: [{ matcher: 'Read', hooks: [{ command: 'py "/c/saver.py" secrets' }] }],
+      },
+    }),
+  })
+  const listed = await saverSetup($, '')
+  expect(listed).toContain('~ statusLine.command')
+  expect(listed).toContain('- permissions.deny: "Read(**/node_modules/**)"')
+  expect(listed).toContain('+ permissions.deny: "Read(**/.env)"')
+  expect(listed).toContain('- hooks.PreToolUse')
+  expect(listed).not.toContain('Bash(rm:*)')
+  expect(d.get(SETTINGS)).toContain('saver.py')
+
+  d.put(SETTINGS, JSON.stringify({ statusLine: { command: 'my-line.sh' } }))
+  expect(await saverSetup($, '')).not.toContain('statusLine')
 })
 
-test('uninstall undoes install; changes() lists what moves', () => {
+test('--uninstall undoes an apply: the user\'s own settings come back as they were', async ($, on) => {
   const mine = { env: { FOO: '1', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '70' }, permissions: { deny: ['Bash(rm:*)'] },
     hooks: { SessionStart: [{ hooks: [{ command: 'mine.sh' }] }] } }
-  const st = applySettings(copy(mine), ['--orchestrate'])
-  const diff = changes(mine, st)
-  expect(diff).toContain('+ model: "opusplan"')
-  expect(diff).toContain('+ permissions.deny: "Read(**/.env)"')
-  expect(diff.some(d => d.includes('FOO'))).toBe(false)
-  expect(removeSettings(st)).toEqual(mine)
-  expect(changes(mine, mine)).toEqual([])
+  const d = world(on, { [SETTINGS]: JSON.stringify(copy(mine)) })
+  await saverSetup($, '--yes --orchestrate')
+  expect(JSON.parse(d.get(SETTINGS)!).model).toBe('opusplan')
+
+  await saverSetup($, '--yes --uninstall')
+  expect(JSON.parse(d.get(SETTINGS)!)).toEqual(mine)
 })
 
-test('conflicts flags standalone caveman copies and hooks', () => {
-  const found = conflicts({ hooks: { SessionStart: [{ hooks: [{ command: 'python caveman-start.py' }] }] } }, ['caveman', 'savings'], '/s')
-  expect(found.length).toBe(2)
-  expect(found[0]).toContain('caveman')
-  expect(found[0]).not.toContain('savings')
-  expect(found[1]).toContain('caveman-start')
-  expect(conflicts({}, [], '/s')).toEqual([])
+test('conflicts: standalone caveman skills and SessionStart hooks are named when plugins are installed', async ($, on) => {
+  world(on, {
+    [SETTINGS]: JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: 'python caveman-start.py' }] }] } }),
+    '/h/.claude/skills/caveman/SKILL.md': 'mine',
+    '/h/.claude/skills/savings/SKILL.md': 'my own',
+  })
+  const done = await saverSetup($, '--with-plugins --yes')
+  expect(done).toContain('Warning: standalone skills in /h/.claude/skills: caveman. Delete them')
+  expect(done).toContain('Warning: custom SessionStart hook: python caveman-start.py. Remove it, or the mode loads twice')
+  expect(done).not.toContain('savings')
 })
 
-test('/saver-setup lists first, then applies: backup, old files removed, --pet carried over', async () => {
+test('/saver-setup lists first, then applies: backup, old files removed, --pet carried over', async ($, on) => {
   const settings = JSON.stringify({ statusLine: { command: '"py" "/h/.claude/statusline.py" --pet' } })
-  const { io, fs, runs } = fakeIo({
-    '/h/.claude/settings.json': settings,
+  const d = world(on, {
+    [SETTINGS]: settings,
     '/h/.claude/statusline.py': 'old',
     '/h/.claude/saver.py': 'old',
     '/h/.claude/skills/savings/SKILL.md': 'Run `py "saver.py" savings`',
     '/h/.claude/skills/pet/SKILL.md': 'my own pet skill',
-  }, { HOME: '/h' })
-  const listed = await setup(io, [])
-  expect(listed).toContain('- statusLine.command')
+  })
+  const listed = await saverSetup($, '')
+  expect(listed).toContain('~ statusLine.command')
   expect(listed).toContain('Run /saver-setup --yes to apply.')
-  expect(fs.get('/h/.claude/settings.json')).toBe(settings)
-  expect(await setup(io, ['--bogus'])).toContain('Unknown option')
+  expect(d.get(SETTINGS)).toBe(settings)
+  expect(await saverSetup($, '--bogus')).toContain('Unknown option')
 
-  const done = await setup(io, ['--yes'])
+  const done = await saverSetup($, '--yes')
   expect(done).toContain('Updated')
-  expect(fs.get('/h/.claude/settings.json.bak')).toBe(settings)
-  const now = JSON.parse(fs.get('/h/.claude/settings.json')!)
-  expect('statusLine' in now).toBe(false)
+  expect(d.get(SETTINGS + '.bak')).toBe(settings)
+  const now = JSON.parse(d.get(SETTINGS)!)
+  expect(now.statusLine).toEqual({ type: 'command', command: 'sh "/h/.claude/.statusline-ctx/statusline.sh"', refreshInterval: 1 })
   expect(now.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe('50')
-  expect(JSON.parse(fs.get('/h/.claude/.statusline-ctx/config.json')!)).toEqual({ pet: true })
-  const removed = runs.map(r => r.at(-1)!.replace(/\\/g, '/'))
+  expect(JSON.parse(d.get('/h/.claude/.statusline-ctx/config.json')!)).toEqual({ pet: true })
+  const removed = d.runs.map(r => r.at(-1)!.replace(/\\/g, '/'))
   expect(removed).toEqual(['/h/.claude/statusline.py', '/h/.claude/saver.py', '/h/.claude/skills/savings'])
+
+  expect(await saverSetup($, '--yes --orchestrate')).toContain('/toggle route')
+  expect(JSON.parse(d.get('/h/.claude/.statusline-ctx/config.json')!)).toEqual({ pet: true, route: true })
 })

@@ -1,5 +1,5 @@
-// /saver-setup, ported from install.py: auto-compact, the .env deny rules and the optional extras in settings.json,
-// and the clean-up of what older versions installed (the Python status line, saver.py, settings hooks and skills).
+// /saver-setup: auto-compact, the .env deny rules and optional extras in settings.json,
+// plus clean-up of what older versions installed.
 import type { Io } from './io'
 
 import { claudeDir, ctxFile, home, isWindows, join, loadJson, read, stat } from './saver'
@@ -10,7 +10,7 @@ export const FLAGS = ['--with-plugins', '--graphify', '--orchestrate', '--pet', 
 export const USAGE = `Usage: /saver-setup [${FLAGS.join('] [')}]
   --with-plugins  also install the ponytail + caveman plugins (via the claude CLI)
   --graphify      also install graphify (PyPI: graphifyy) and its skill
-  --orchestrate   plan on Opus, execute on Sonnet (model: opusplan), subagents on Haiku
+  --orchestrate   plan on Opus, execute on Sonnet (model: opusplan), read-only subagents on Haiku (/toggle route)
   --all           plugins + graphify (not --orchestrate: that changes your model)
   --pet           a pet on the status line, fed by tokens saved
   --yes           apply the changes; without it they are only listed
@@ -20,6 +20,7 @@ export const MARKETPLACES: Record<string, string> = { ponytail: 'DietrichGebert/
 
 // Secrets stay out of the API even where the mod is not loaded. Named files, not .env.*, so .env.example stays readable.
 export const DENY_READS = ['Read(**/.env)', 'Read(**/.env.local)', 'Read(**/.env.*.local)']
+export const STATUS_SCRIPT = '.statusline-ctx/statusline.sh'
 
 // What older versions installed and the mod now does: removed on install and uninstall.
 const OLD_DENY_READS = ['node_modules', '__pycache__', '.venv', 'venv', '.next', 'coverage'].map(d => `Read(**/${d}/**)`)
@@ -54,17 +55,16 @@ export function dropOld(settings: Json) {
 }
 
 /** Merge claude-saver's keys into settings.json; keep the user's own values. */
-export function applySettings(settings: Json, args: string[]) {
+export function applySettings(settings: Json, args: string[], dir = '') {
   const env: Json = (settings.env ??= {})
   // Undocumented but read by Claude Code: auto-compact at 50% of the window instead of near full.
   env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE ??= '50'
-  if (args.includes('--orchestrate')) {
-    settings.model = 'opusplan'
-    env.CLAUDE_CODE_SUBAGENT_MODEL ??= 'haiku'
-  }
+  // Subagents: the mod's route switch (setup turns it on), not CLAUDE_CODE_SUBAGENT_MODEL, which puts builders on Haiku too.
+  if (args.includes('--orchestrate')) settings.model = 'opusplan'
   const deny: string[] = ((settings.permissions ??= {}).deny ??= [])
   deny.push(...DENY_READS.filter(r => !deny.includes(r)))
   dropOld(settings)
+  settings.statusLine ??= { type: 'command', command: `sh "${join(dir, STATUS_SCRIPT)}"`, refreshInterval: 1 }
   if (withPlugins(args)) {
     const markets: Json = (settings.extraKnownMarketplaces ??= {})
     const plugins: Json = (settings.enabledPlugins ??= {})
@@ -82,6 +82,8 @@ export function removeSettings(settings: Json) {
   for (const [key, value] of [['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', '50'], ['CLAUDE_CODE_SUBAGENT_MODEL', 'haiku']] as const)
     if (env[key] === value) delete env[key]
   if (settings.model === 'opusplan') delete settings.model
+  if (typeof settings.statusLine?.command === 'string' && settings.statusLine.command.includes(STATUS_SCRIPT))
+    delete settings.statusLine
   const deny = settings.permissions?.deny
   if (Array.isArray(deny)) settings.permissions.deny = deny.filter(r => !DENY_READS.includes(r))
   dropOld(settings)
@@ -192,7 +194,7 @@ export async function setup(io: Io, args: string[]) {
   const legacyPet = legacyCommand(settings)?.endsWith(' --pet') ?? false
   const before = JSON.parse(JSON.stringify(settings))
   if (uninstall) removeSettings(settings)
-  else applySettings(settings, args)
+  else applySettings(settings, args, dir)
   const diff = changes(before, settings)
   const out = diff.length ? [`Changes to ${path}:`, ...diff.map(l => '  ' + l)] : [`No changes to ${path}.`]
   if (!args.includes('--yes') || args.includes('--dry-run')) {
@@ -219,13 +221,26 @@ export async function setup(io: Io, args: string[]) {
     return out.join('\n')
   }
 
+  const scriptPath = join(dir, STATUS_SCRIPT)
+  await io.write(scriptPath, `#!/bin/sh
+# claude-saver: prints the status line the mod drew for this session.
+id=$(sed -n 's/.*"session_id" *: *"\\([^"]*\\)".*/\\1/p' | head -n 1)
+cat "${dir}/.statusline-ctx/line/$id.txt" 2>/dev/null
+`)
+
   // The pet now follows /toggle pet; carry over an older install's --pet.
   const cfgPath = await ctxFile(io, 'config.json')
   const cfg = await loadJson(io, cfgPath)
+  const on: Json = {}
   if ((args.includes('--pet') || legacyPet) && typeof cfg.pet !== 'boolean') {
-    await io.write(cfgPath, JSON.stringify({ ...cfg, pet: true }))
+    on.pet = true
     out.push('Pet on (/toggle pet to hide it)')
   }
+  if (args.includes('--orchestrate') && typeof cfg.route !== 'boolean') {
+    on.route = true
+    out.push('Read-only subagents on Haiku (/toggle route to turn it off)')
+  }
+  if (Object.keys(on).length) await io.write(cfgPath, JSON.stringify({ ...cfg, ...on }))
   if (args.includes('--graphify') || args.includes('--all')) await installGraphify(io, out)
   if (withPlugins(args)) {
     if (await installPlugins(io)) out.push('Installed ponytail and caveman plugins')

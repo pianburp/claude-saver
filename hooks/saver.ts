@@ -39,6 +39,7 @@ export const SWITCHES: Record<string, string> = {
   secrets: 'secret guard: blocks .env access and hardcoded keys',
   reads: 'read guards: generated folders, lockfiles, huge files, unchanged re-reads',
   focus: 'focus mode: hide tool calls, show steps and what is left',
+  route: 'subagent models: read-only subagents (Explore and the like) on Haiku',
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -349,8 +350,8 @@ export async function audit(io: Io, cwd: string) {
   if (await isFile(io, join(cwd, '.claudeignore'))) tips.push('Claude Code does not read .claudeignore. Move its entries to permissions.deny.')
   if (heavy.length)
     tips.push(`Unblocked heavy dirs: ${heavy.join(', ')}. Add to permissions.deny in .claude/settings.json: ${heavy.map(d => `"Read(./${d}/**)"`).join(', ')}`)
-  if (!(await envValue(io, 'CLAUDE_CODE_SUBAGENT_MODEL', cwd))) {
-    let tip = 'Subagents use your main model. CLAUDE_CODE_SUBAGENT_MODEL=haiku makes exploration and log reading cheaper.'
+  if (!(await envValue(io, 'CLAUDE_CODE_SUBAGENT_MODEL', cwd)) && !(await isOn(io, 'route'))) {
+    let tip = 'Subagents use your main model. /toggle route on runs read-only ones (Explore) on Haiku.'
     const agents = await unpinnedAgents(io, cwd)
     if (agents.length) tip += ` Or add \`model: haiku\` to these agents: ${agents.join(', ')}.`
     tips.push(tip)
@@ -748,7 +749,7 @@ export async function isOn(io: Io, name: string) {
   const value = (await loadJson(io, await ctxFile(io, 'config.json')))[name]
   if (typeof value === 'boolean') return value
   if (name === 'pet') return ((await legacyStatusLine(io)) ?? '').endsWith(' --pet')
-  return true
+  return name !== 'route' // it changes which model runs: opt-in
 }
 
 /** toggle [NAME [on|off]]: flip or set a switch, then list them all. No restart needed. */

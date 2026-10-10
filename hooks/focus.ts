@@ -1,5 +1,21 @@
 // Focus mode's pure parts; its hooks live in register.tsx, since $ never crosses an import.
-import type { Step } from '../types'
+import type { Agent, Step } from '../types'
+
+const AGENT_ROWS = 4 // subagent rows the band draws; the rest are counted
+// Subagent types that only read and search: /toggle route runs them on Haiku.
+const READ_ONLY = ['Explore', 'claude-code-guide', 'statusline-setup']
+
+/** The model /toggle route gives a subagent: Haiku for a read-only type, else none (it keeps its own or the default). */
+export function routeModel(type: string, model: string | undefined) {
+  if (model) return undefined // the agent's definition or the call chose one
+  return READ_ONLY.includes(type) || /-investigator$|-explore$/.test(type) ? 'haiku' : undefined
+}
+
+/** The subagent rows the band draws, running ones first, capped; `more` counts the rest. */
+export function agentRows(agents: readonly Agent[]) {
+  const sorted = [...agents.filter(a => !a.done), ...agents.filter(a => a.done)]
+  return { rows: sorted.slice(0, AGENT_ROWS), more: Math.max(0, sorted.length - AGENT_ROWS) }
+}
 
 /** Asks Claude to keep the step list the focus band draws, and to end on a short summary. */
 export const FOCUS_PROMPT = {

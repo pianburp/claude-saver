@@ -1,4 +1,4 @@
-// The status line, ported from statusline.py and drawn by the mod under the prompt (register.tsx draws the rows).
+// The status line, ported from statusline.py and drawn by the mod into a per-session file.
 //
 // ✻ model · effort · active modes (ponytail, caveman) · saved · prompt cache
 // ⎿ context · 5h limit · 7d limit (each with "full <time>" when the pace so far runs out before the reset)
@@ -61,6 +61,17 @@ const label = (text: string) => seg(text, GRAY)
 const SEP = seg(' · ', DARK)
 
 export const levelColor = (pct: number) => (pct < 50 ? GREEN : pct < 80 ? YELLOW : RED)
+
+/** Serialize status rows for Claude Code's command statusLine. */
+export function ansi(rows: readonly Row[], noColor: boolean): string {
+  return rows.map(row => row.map(s => {
+    if (noColor) return s.text
+    const rgb = s.color ? unhex(s.color) : undefined
+    const color = rgb ? `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m` : ''
+    const bold = s.bold ? '\x1b[1m' : ''
+    return `${color}${bold}${s.text}\x1b[0m`
+  }).join('')).join('\n')
+}
 
 function toPct(value: unknown) {
   const n = Number(value)
