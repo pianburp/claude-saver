@@ -198,6 +198,14 @@ export type Input = {
   compactPct: number
 }
 
+/** `claude-opus-5-5[1m]` to `Opus 5.5 (1M)`; an alias or unknown id is shown as is. */
+export function modelName(id: string) {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(id)
+  if (!m) return id
+  const [, family, major, minor, long] = m
+  return `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? '.' + minor : ''}${long ? ' (1M)' : ''}`
+}
+
 /** The status line as rows of colored runs; state carries the glows between frames. */
 export function render(d: Input, state: State, now: number): Row[] {
   // Frames follow the clock, not the redraw count.
@@ -209,7 +217,7 @@ export function render(d: Input, state: State, now: number): Row[] {
   const saved = Number(state.saved_n) || 0
   const [savedShown, savedAge] = saved ? rose(state, 'saved', saved, now) : [0, undefined]
   const line1: Seg[][] = [
-    [seg(`${star} ${d.model || 'Claude'}`, CLAUDE, true)],
+    [seg(`${star} ${modelName(d.model) || 'Claude'}`, CLAUDE, true)],
     d.effort ? [seg(EFFORT[d.effort] ?? d.effort, GRAY)] : [],
     fmtModes(d.modes, modesHit?.[1]),
     saved ? [label('saved '), seg('~' + fmt(savedShown), glow(savedAge, GREEN))] : [],

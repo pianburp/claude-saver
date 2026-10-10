@@ -29,7 +29,7 @@ async function startLine($: Engine, on: On, { files = {}, env = {}, transcript =
   on('session.id', () => ({ value: 's1' }))
   on('session.root', () => ({ value: '/proj' }))
   on('session.cwd', () => ({ value: '/proj' }))
-  on('session.model', () => ({ value: 'Opus' }))
+  on('session.model', () => ({ value: 'claude-opus-5-5[1m]' }))
   on('session.usage', () => ({ value: state.usage }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -49,9 +49,9 @@ test('status line: model, spinner while the transcript is written, effort, the c
   const { state, idleAt } = await startLine($, on, { files: { [SETTINGS]: JSON.stringify({ effortLevel: 'xhigh' }) } })
   const busy = (await idleAt(0)).split('\n')[0]!
   expect('·✢✳✶✻✽'.includes(busy[0]!)).toBe(true)
-  expect(busy).toContain('Opus · xhi')
+  expect(busy).toContain('Opus 5.5 (1M) · xhi')
   const quiet = (await idleAt(60)).split('\n')
-  expect(quiet[0]!.startsWith('✻ Opus · xhi')).toBe(true)
+  expect(quiet[0]!.startsWith('✻ Opus 5.5 (1M) · xhi')).toBe(true)
   expect(quiet[1]!.endsWith('● 59m')).toBe(true)
 
   state.usage = usage(40)
